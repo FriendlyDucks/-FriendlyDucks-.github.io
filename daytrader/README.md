@@ -11,12 +11,25 @@ Nordnet-order. Standard är **pappershandel med riktiga kurser från Nordnet**.
 | **Rut** | Riskhanterare (storlek, stop-loss, trailing, vinstmål) |
 | **Djävulens advokat** | Alltid negativ – säger emot och försöker övertala de andra |
 
-## Steg 1: Claude (Anthropic API)
+## Steg 1: Välj AI-motor
 
-1. Skapa konto på <https://platform.claude.com>.
-2. Lägg in betalkort och köp krediter under **Billing** (API:t är förbetalt och
-   separat från en Claude Pro/Max-prenumeration).
-3. Skapa en nyckel under **API Keys** och lägg den i `.env` som `ANTHROPIC_API_KEY`.
+Välj med `LLM_BACKEND` i `.env` eller `--backend`:
+
+| Motor | Kostnad | Kvalitet | Så kommer du igång |
+|---|---|---|---|
+| `ollama` (standard) | Gratis, körs på din dator | Sämre än Claude | Installera [Ollama](https://ollama.com), kör `ollama pull qwen2.5:14b` |
+| `claude-code` | Ingår i Claude Pro/Max | Claude | Installera [Claude Code](https://claude.com/claude-code), kör `claude` en gång och logga in |
+| `api` | API-krediter (~0,10 kr per möte med Haiku 5.5) | Claude | Nyckel från [platform.claude.com](https://platform.claude.com) i `ANTHROPIC_API_KEY` |
+
+**Ollama:** `qwen2.5:14b` behöver ungefär 10 GB grafikminne eller 16 GB RAM och är
+långsam utan grafikkort. På en svagare dator, välj `qwen2.5:7b` (`--ollama-model qwen2.5:7b`).
+Lokala modeller svarar ibland med felaktigt format. Då frågar programmet om en gång, och
+lyckas det inte heller räknas rösten som HOLD.
+
+**Claude Code:** prenumerationen har användningsgränser per femtimmarsperiod. Med många
+möten kan du nå gränsen, och då pausar rådet. Kör färre möten (`--interval 30 --rounds 1`)
+eller välj `CLAUDE_MODEL=claude-sonnet-5-5`, som räcker längre. Programmet tar bort
+`ANTHROPIC_API_KEY` när det anropar `claude`, så att prenumerationen används och inte krediter.
 
 ## Steg 2: Nordnet API
 
@@ -47,7 +60,7 @@ förnyas av programmet.
 ```bash
 pip install -r requirements.txt
 cp .env.example .env        # fyll i nycklarna
-python check_setup.py       # testar Claude och Nordnet
+python check_setup.py       # testar AI-motorn och Nordnet
 
 python main.py --tickers "VOLV B=VOLV-B.ST" "ERIC B=ERIC-B.ST"
 python main.py --tickers "VOLV B" --interval 0 --ignore-hours   # ett möte, för test
@@ -103,11 +116,8 @@ stoppar för stora order. Kontrollera innan du går live:
 > ⚠️ Daytrading innebär stor risk och de flesta förlorar pengar. Programmet är ett
 > experiment, inte finansiell rådgivning.
 
-## Kostnad för Claude
+## Kostnad med `--backend api`
 
-Ett möte kostar `5 × rundor + 4` API-anrop per aktie (14 med standardinställningar).
-Med Claude Opus 5.5 ($4 per miljon tokens in, $20 per miljon ut) kostar det ungefär
-3–5 kr per möte och aktie. Mötestiden varierar. Ett möte var 15:e minut under en
-handelsdag blir ungefär 33 möten, alltså cirka 100–170 kr per aktie och dag. Sänk
-kostnaden med `--interval 30`, `--rounds 1` eller `CLAUDE_MODEL=claude-sonnet-5-5`
-(halva priset).
+Ett möte kostar `5 × rundor + 4` anrop per aktie (14 med standardinställningar).
+Ungefärlig kostnad per möte och aktie: Opus 5.5 ~5 kr, Sonnet 5.5 ~2,5 kr,
+Haiku 5.5 ~0,10 kr. Med `ollama` eller `claude-code` kostar det inga krediter.

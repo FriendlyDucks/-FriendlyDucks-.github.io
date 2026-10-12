@@ -18,10 +18,9 @@ from pathlib import Path
 from statistics import mean
 from typing import Optional
 
-import anthropic
-
 import config
 from agents import MODEL, Council
+from llm import DEFAULT_OLLAMA_MODEL, make_backend
 from market import MarketData, NordnetMarketData, YahooMarketData, market_is_open
 from orders import Activation, OrderRequest, OrderType, TradePlan, Side, Tradable
 from paper_broker import CostModel, PaperBroker
@@ -50,8 +49,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--courtage-pct", type=float, default=0.25, help="Courtage i %% (ställ in din courtageklass)")
     p.add_argument("--courtage-min", type=float, default=1.0, help="Minsta courtage i kr")
     p.add_argument("--portfolio", type=Path, default=Path("portfolio.json"))
-    p.add_argument("--model", default=config.env("CLAUDE_MODEL", MODEL))
-    p.add_argument("--effort", default="low", choices=["low", "medium", "high", "xhigh", "max"])
+    p.add_argument("--backend", choices=["ollama", "claude-code", "api"], default=config.env("LLM_BACKEND", "ollama"),
+                   help="ollama = lokal gratismodell, claude-code = din Claude-prenumeration, api = API-krediter")
+    p.add_argument("--model", default=config.env("CLAUDE_MODEL", MODEL), help="Claude-modell (claude-code/api)")
+    p.add_argument("--effort", default="low", choices=["low", "medium", "high", "xhigh", "max"], help="Endast api")
+    p.add_argument("--ollama-model", default=config.env("OLLAMA_MODEL", DEFAULT_OLLAMA_MODEL))
+    p.add_argument("--ollama-url", default=config.env("OLLAMA_URL", "http://localhost:11434"))
     p.add_argument("--live", action="store_true", help="RIKTIGA order via Nordnet (kräver NORDNET_LIVE_CONFIRM=JA)")
     p.add_argument("--max-order-value", type=float, default=20_000, help="Spärr per order i live-läge (kr)")
     return p.parse_args()
@@ -234,11 +237,12 @@ def main() -> None:
         shortable = set(args.shortable) if args.shortable else None
         broker = PaperBroker(args.portfolio, args.cash, costs, allow_short=not args.no_short, shortable=shortable)
         print("PAPPERSHANDEL – inga riktiga order skickas.")
-    print(f"Kursdata: {market.name}. Modell: {args.model}.")
+    backend = make_backend(args.backend, args.model, args.effort, args.ollama_model, args.ollama_url)
+    print(f"Kursdata: {market.name}. AI-motor: {backend.name}.")
 
     market.add_listener(broker.on_quote)
     market.start(tradables)
-    council = Council(anthropic.Anthropic(), model=args.model, effort=args.effort)
+    council = Council(backend)
     plans: dict[str, TradePlan] = {}
     next_meeting = 0.0
 

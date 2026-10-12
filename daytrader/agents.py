@@ -3,12 +3,9 @@ djävulens advokat som alltid säger emot och försöker övertala de andra."""
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 
-import anthropic
-
-MODEL = "claude-opus-5-5"
+from llm import DEFAULT_CLAUDE_MODEL as MODEL, Backend, LLMError, extract_json
 
 COMMON_RULES = """Du är med i ett handelsråd med fem agenter som diskuterar en daytrade-affär.
 Rådet handlar via Nordnet, just nu på papper med riktiga kurser. Svara alltid på svenska.
@@ -109,29 +106,41 @@ VOTE_SCHEMA = {
 }
 
 
+def normalize_vote(raw: dict) -> dict:
+    """Säkerställer en giltig röst även om en lokal modell svarar slarvigt."""
+
+    def num(key: str) -> float:
+        try:
+            return max(0.0, float(raw.get(key, 0) or 0))
+        except (TypeError, ValueError):
+            return 0.0
+
+    action = str(raw.get("action", "HOLD")).upper()
+    order_type = str(raw.get("order_type", "LIMIT")).upper()
+    try:
+        offset = max(-1.0, min(float(raw.get("limit_offset_pct", 0) or 0), 1.0))
+    except (TypeError, ValueError):
+        offset = 0.0
+    return {
+        "action": action if action in ("BUY", "SELL", "SHORT", "COVER", "HOLD") else "HOLD",
+        "confidence": int(min(num("confidence"), 100)),
+        "position_pct": min(num("position_pct"), 100.0),
+        "order_type": order_type if order_type in ("LIMIT", "FAK", "FOK") else "LIMIT",
+        "limit_offset_pct": offset,
+        "stop_loss_pct": num("stop_loss_pct"),
+        "take_profit_pct": num("take_profit_pct"),
+        "trailing_stop_pct": num("trailing_stop_pct"),
+        "changed_mind_because_of_devil": bool(raw.get("changed_mind_because_of_devil", False)),
+        "reasoning": str(raw.get("reasoning", ""))[:500],
+    }
+
+
 class Council:
-    def __init__(self, client: anthropic.Anthropic, model: str = MODEL, effort: str = "low") -> None:
-        self.client = client
-        self.model = model
-        self.effort = effort
+    def __init__(self, backend: Backend) -> None:
+        self.backend = backend
 
     def _ask(self, agent: Agent, prompt: str, schema: dict | None = None) -> str:
-        output_config: dict = {"effort": self.effort}
-        if schema:
-            output_config["format"] = {"type": "json_schema", "schema": schema}
-        response = self.client.beta.messages.create(
-            model=self.model,
-            max_tokens=16000,
-            system=agent.system,
-            messages=[{"role": "user", "content": prompt}],
-            output_config=output_config,
-            # Om modellen nekar körs samma förfrågan om på en reservmodell.
-            betas=["server-side-fallback-2026-07-01"],
-            fallbacks="default",
-        )
-        if response.stop_reason == "refusal":
-            raise RuntimeError(f"{agent.name} avböjde att svara")
-        return "".join(b.text for b in response.content if b.type == "text").strip()
+        return self.backend.complete(agent.system, prompt, schema)
 
     def debate(self, snapshot_text: str, portfolio_text: str, rounds: int) -> list[tuple[str, str]]:
         transcript: list[tuple[str, str]] = []
@@ -174,6 +183,12 @@ class Council:
         )
         votes = {}
         for agent in ANALYSTS:
-            raw = self._ask(agent, prompt, schema=VOTE_SCHEMA)
-            votes[agent.name] = json.loads(raw)
+            for attempt in range(2):
+                try:
+                    votes[agent.name] = normalize_vote(extract_json(self._ask(agent, prompt, schema=VOTE_SCHEMA)))
+                    break
+                except (LLMError, ValueError) as e:
+                    print(f"  Ogiltig röst från {agent.name} ({e}){' – försöker igen' if attempt == 0 else ''}")
+            else:
+                votes[agent.name] = normalize_vote({"action": "HOLD", "reasoning": "kunde inte tolka rösten"})
         return votes

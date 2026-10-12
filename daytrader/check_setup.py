@@ -1,4 +1,4 @@
-"""Kontrollerar att anslutningarna till Claude och Nordnet fungerar.
+"""Kontrollerar att AI-motorn (Ollama, Claude Code eller Claude API) och Nordnet fungerar.
 
     python check_setup.py
 """
@@ -7,14 +7,34 @@ from __future__ import annotations
 
 import sys
 
-import anthropic
-
 import config
 from agents import MODEL
 
 
-def check_claude() -> bool:
-    print("1. Claude (Anthropic API)")
+def check_ai() -> bool:
+    kind = config.env("LLM_BACKEND", "ollama")
+    print(f"1. AI-motor: {kind}")
+    if kind == "api":
+        return check_claude_api()
+    from llm import DEFAULT_OLLAMA_MODEL, LLMError, make_backend
+
+    try:
+        backend = make_backend(kind, config.env("CLAUDE_MODEL", MODEL), "low",
+                               config.env("OLLAMA_MODEL", DEFAULT_OLLAMA_MODEL),
+                               config.env("OLLAMA_URL", "http://localhost:11434"))
+        text = backend.complete("Du är en testagent.", "Svara bara: anslutningen fungerar")
+        print(f"   OK – {backend.name} svarade: {text[:80]!r}")
+        return True
+    except (LLMError, OSError) as e:
+        print(f"   FEL: {e}")
+    except Exception as e:
+        print(f"   FEL: {type(e).__name__}: {e}")
+    return False
+
+
+def check_claude_api() -> bool:
+    import anthropic
+
     model = config.env("CLAUDE_MODEL", MODEL)
     try:
         client = anthropic.Anthropic()
@@ -72,6 +92,6 @@ def check_nordnet() -> bool:
 
 if __name__ == "__main__":
     config.load_env()
-    ok = check_claude() & check_nordnet()
+    ok = check_ai() & check_nordnet()
     print("\nAllt klart!" if ok else "\nÅtgärda felen ovan och kör igen.")
     sys.exit(0 if ok else 1)
