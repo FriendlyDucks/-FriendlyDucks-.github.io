@@ -11,7 +11,12 @@ import anthropic
 MODEL = "claude-opus-5-5"
 
 COMMON_RULES = """Du är med i ett handelsråd med fem agenter som diskuterar en daytrade-affär.
-Rådet handlar enbart på papper (simulerade pengar). Svara alltid på svenska.
+Rådet handlar via Nordnet, just nu på papper med riktiga kurser. Svara alltid på svenska.
+Möjliga beslut: BUY (köpa/öka lång position), SELL (stänga lång position), SHORT (blanka),
+COVER (köpa tillbaka blankade aktier) eller HOLD (göra ingenting).
+Ordertyper: LIMIT (ligger kvar i orderboken), FAK (fyll det som går direkt), FOK (allt eller inget direkt).
+Skydd som läggs direkt efter köp/blankning: stop-loss, trailing stop eller vinstmål + stop (OCO).
+Tänk på spread, courtage och att positioner ska vara stängda innan börsen stänger.
 Håll varje inlägg under 120 ord. Tilltala de andra agenterna vid namn när du bemöter dem.
 Hitta inte på siffror – använd bara marknadsdatan och det som sagts i diskussionen."""
 
@@ -33,16 +38,16 @@ ANALYSTS = [
         name="Tekla",
         role="Teknisk analytiker",
         persona=(
-            "Du läser diagram: RSI, glidande medelvärden, VWAP, dagens högsta/lägsta och volym. "
-            "Lyft fram de tekniska fördelarna med en affär och föreslå konkreta in- och utgångsnivåer."
+            "Du läser diagram och orderbok: RSI, glidande medelvärden, VWAP, dagens högsta/lägsta, volym, "
+            "bid/ask och spread. Lyft fram de tekniska fördelarna och föreslå konkreta in- och utgångsnivåer."
         ),
     ),
     Agent(
         name="Moa",
         role="Momentum- och trendstrateg",
         persona=(
-            "Du letar efter starka intradagsrörelser och volymutbrott som går att rida på. "
-            "Argumentera för hur rådet kan tjäna pengar på dagens momentum och vilken tidshorisont som passar."
+            "Du letar efter starka intradagsrörelser och volymutbrott som går att rida på – uppåt (köp) "
+            "eller nedåt (blankning). Argumentera för hur rådet kan tjäna pengar på dagens momentum."
         ),
     ),
     Agent(
@@ -57,8 +62,8 @@ ANALYSTS = [
         name="Rut",
         role="Riskhanterare",
         persona=(
-            "Du fokuserar på positionsstorlek, stop-loss och risk/reward. Du är positiv till affärer "
-            "med bra riskprofil och föreslår hur stor andel av kapitalet som är rimligt."
+            "Du fokuserar på positionsstorlek, stop-loss, trailing stop, vinstmål och risk/reward. Du är positiv "
+            "till affärer med bra riskprofil och föreslår storlek, ordertyp och skyddsnivåer."
         ),
     ),
 ]
@@ -79,16 +84,27 @@ DEVIL = Agent(
 VOTE_SCHEMA = {
     "type": "object",
     "properties": {
-        "action": {"type": "string", "enum": ["BUY", "SELL", "HOLD"]},
+        "action": {"type": "string", "enum": ["BUY", "SELL", "SHORT", "COVER", "HOLD"]},
         "confidence": {"type": "integer", "description": "0–100"},
         "position_pct": {
             "type": "number",
-            "description": "Andel av kapitalet (0–100) att använda vid köp. 0 vid SELL/HOLD.",
+            "description": "Andel av kapitalet (0–100) vid BUY/SHORT. 0 annars.",
         },
+        "order_type": {"type": "string", "enum": ["LIMIT", "FAK", "FOK"]},
+        "limit_offset_pct": {
+            "type": "number",
+            "description": "Limitpris i procent från mittkursen. Positivt = mer aggressivt (betala mer vid köp, ta lägre vid sälj).",
+        },
+        "stop_loss_pct": {"type": "number", "description": "Stop-loss i procent från ingångspriset. 0 = ingen."},
+        "take_profit_pct": {"type": "number", "description": "Vinstmål i procent. 0 = inget (då används ren stop-loss)."},
+        "trailing_stop_pct": {"type": "number", "description": "Trailing stop i procent. 0 = ingen. Ersätter stop-loss/vinstmål."},
         "changed_mind_because_of_devil": {"type": "boolean"},
         "reasoning": {"type": "string", "description": "En till två meningar."},
     },
-    "required": ["action", "confidence", "position_pct", "changed_mind_because_of_devil", "reasoning"],
+    "required": [
+        "action", "confidence", "position_pct", "order_type", "limit_offset_pct", "stop_loss_pct",
+        "take_profit_pct", "trailing_stop_pct", "changed_mind_because_of_devil", "reasoning",
+    ],
     "additionalProperties": False,
 }
 
@@ -134,7 +150,7 @@ class Council:
                         "få minst en av analytikerna att byta sida."
                     )
                 elif rnd == 1:
-                    task = "Ge din första bedömning: köpa, sälja eller avvakta, och vilka fördelar du ser."
+                    task = "Ge din första bedömning: köpa, blanka, stänga eller avvakta, och vilka fördelar du ser."
                 else:
                     task = (
                         "Bemöt de andra – särskilt Djävulens advokat. Står du fast vid din bedömning "
@@ -154,7 +170,7 @@ class Council:
         prompt = (
             f"MARKNADSDATA\n{snapshot_text}\n\nPORTFÖLJ\n{portfolio_text}\n\n"
             f"HELA DISKUSSIONEN\n{discussion}\n\n"
-            "Diskussionen är slut. Lägg din slutliga röst: BUY, SELL eller HOLD."
+            "Diskussionen är slut. Lägg din slutliga röst med ordertyp och skyddsnivåer."
         )
         votes = {}
         for agent in ANALYSTS:

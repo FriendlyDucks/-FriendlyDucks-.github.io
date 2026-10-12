@@ -1,0 +1,77 @@
+"""Kontrollerar att anslutningarna till Claude och Nordnet fungerar.
+
+    python check_setup.py
+"""
+
+from __future__ import annotations
+
+import sys
+
+import anthropic
+
+import config
+from agents import MODEL
+
+
+def check_claude() -> bool:
+    print("1. Claude (Anthropic API)")
+    model = config.env("CLAUDE_MODEL", MODEL)
+    try:
+        client = anthropic.Anthropic()
+        r = client.messages.create(
+            model=model,
+            max_tokens=2000,
+            output_config={"effort": "low"},
+            messages=[{"role": "user", "content": "Svara bara: anslutningen fungerar"}],
+        )
+        text = "".join(b.text for b in r.content if b.type == "text").strip()
+        print(f"   OK – {model} svarade: {text!r}")
+        print(f"   Tokens: {r.usage.input_tokens} in / {r.usage.output_tokens} ut")
+        return True
+    except anthropic.AuthenticationError:
+        print("   FEL: ogiltig eller saknad ANTHROPIC_API_KEY (se .env.example)")
+    except anthropic.PermissionDeniedError:
+        print("   FEL: nyckeln saknar behörighet – kontrollera kontot på platform.claude.com")
+    except anthropic.NotFoundError:
+        print(f"   FEL: modellen {model} finns inte för ditt konto")
+    except anthropic.RateLimitError:
+        print("   FEL: för många anrop eller slut på krediter – kontrollera Billing")
+    except anthropic.APIStatusError as e:
+        print(f"   FEL: {e.status_code} {e.message}")
+    except anthropic.APIConnectionError:
+        print("   FEL: kunde inte nå api.anthropic.com – kontrollera nätverket")
+    return False
+
+
+def check_nordnet() -> bool:
+    print("\n2. Nordnet API")
+    if not config.nordnet_configured():
+        print("   Hoppar över: NORDNET_API_KEY / NORDNET_PRIVATE_KEY saknas i .env.")
+        print("   Programmet använder då Yahoo Finance för kurser (fördröjda).")
+        return True
+    client = config.make_nordnet_client()
+    try:
+        info = client.login()
+        print(f"   OK – inloggad. Publik feed: {info['public_feed']['hostname']}:{info['public_feed']['port']}")
+        for acc in client.accounts():
+            print(f"   Konto accid={acc.get('accid')} nr={acc.get('accno')} typ={acc.get('type')} "
+                  f"förvalt={acc.get('default', acc.get('is_default'))}")
+        t = client.tradable_from_symbol("VOLV B", 11)
+        price = client.tradable_info(t).get("price_info", {})
+        print(f"   Testkurs VOLV B ({t.key}): senast {price.get('last')}, bid {price.get('bid')}, ask {price.get('ask')}")
+        return True
+    except Exception as e:
+        print(f"   FEL: {e}")
+        return False
+    finally:
+        try:
+            client.logout()
+        except Exception:
+            pass
+
+
+if __name__ == "__main__":
+    config.load_env()
+    ok = check_claude() & check_nordnet()
+    print("\nAllt klart!" if ok else "\nÅtgärda felen ovan och kör igen.")
+    sys.exit(0 if ok else 1)

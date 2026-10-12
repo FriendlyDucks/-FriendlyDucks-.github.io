@@ -1,17 +1,26 @@
-"""Marknadsdata: hämtar intradagskurser och räknar ut enkla indikatorer."""
+"""Marknadsdata från Nordnet (realtid via feed) med Yahoo Finance som reserv."""
 
 from __future__ import annotations
 
+import threading
+import time
+from collections import defaultdict
 from dataclasses import dataclass
+from datetime import datetime
+from typing import Callable, Optional
 
 import pandas as pd
-import yfinance as yf
+
+from orders import Quote, Tradable
+
+QuoteListener = Callable[[Tradable, Quote], None]
 
 
 @dataclass
 class Snapshot:
-    ticker: str
-    price: float
+    tradable: Tradable
+    source: str
+    quote: Quote
     change_pct_today: float
     rsi_14: float
     sma_20: float
@@ -20,18 +29,26 @@ class Snapshot:
     volume_vs_avg: float
     day_high: float
     day_low: float
+    bars: int
     headlines: list[str]
 
+    @property
+    def price(self) -> float:
+        return self.quote.last or self.quote.mid
+
     def to_text(self) -> str:
+        q = self.quote
+        spread = (q.ask - q.bid) / q.mid * 100 if q.bid and q.ask else 0.0
         lines = [
-            f"Ticker: {self.ticker}",
-            f"Senaste pris: {self.price:.2f}",
+            f"Värdepapper: {self.tradable.symbol} ({self.tradable.currency}), datakälla: {self.source}",
+            f"Senast: {q.last:.2f}  Köp (bid): {q.bid:.2f} x {q.bid_volume:.0f}  Sälj (ask): {q.ask:.2f} x {q.ask_volume:.0f}  Spread: {spread:.2f} %",
             f"Förändring idag: {self.change_pct_today:+.2f} %",
             f"Dagens högsta/lägsta: {self.day_high:.2f} / {self.day_low:.2f}",
-            f"RSI(14, 5m): {self.rsi_14:.1f}",
-            f"SMA20 / SMA50 (5m): {self.sma_20:.2f} / {self.sma_50:.2f}",
+            f"RSI(14, 1m): {self.rsi_14:.1f}",
+            f"SMA20 / SMA50 (1m): {self.sma_20:.2f} / {self.sma_50:.2f}",
             f"VWAP idag: {self.vwap:.2f}",
-            f"Volym senaste 5m jämfört med snitt: {self.volume_vs_avg:.2f}x",
+            f"Volym senaste minuten jämfört med snitt: {self.volume_vs_avg:.2f}x",
+            f"Antal minutstaplar i underlaget: {self.bars}",
             "Rubriker:",
         ]
         lines += [f"  - {h}" for h in self.headlines] or ["  (inga)"]
@@ -43,52 +60,236 @@ def _rsi(close: pd.Series, period: int = 14) -> float:
     gain = delta.clip(lower=0).rolling(period).mean()
     loss = (-delta.clip(upper=0)).rolling(period).mean()
     rs = gain / loss.replace(0, float("nan"))
-    rsi = 100 - 100 / (1 + rs)
-    value = rsi.iloc[-1]
+    value = (100 - 100 / (1 + rs)).iloc[-1]
     return float(value) if pd.notna(value) else 50.0
 
 
-def _headlines(ticker: yf.Ticker, limit: int = 5) -> list[str]:
-    # yfinance ändrar formatet på nyheter ibland, så läs defensivt.
-    try:
-        items = ticker.news or []
-    except Exception:
-        return []
-    out = []
-    for item in items[:limit]:
-        title = item.get("title") or item.get("content", {}).get("title")
-        if title:
-            out.append(title)
-    return out
-
-
-def get_snapshot(symbol: str) -> Snapshot:
-    ticker = yf.Ticker(symbol)
-    bars = ticker.history(period="5d", interval="5m")
+def build_snapshot(
+    tradable: Tradable, source: str, quote: Quote, bars: pd.DataFrame, ref_close: float, headlines: list[str]
+) -> Snapshot:
+    """bars: minutstaplar för dagen med kolumnerna Open, High, Low, Close, Volume."""
+    price = quote.last or quote.mid
     if bars.empty:
-        raise RuntimeError(f"Ingen kursdata för {symbol}")
-
-    last_day = bars.index[-1].date()
-    today = bars[bars.index.date == last_day]
-    prev_close = bars[bars.index.date < last_day]["Close"]
-    ref = float(prev_close.iloc[-1]) if not prev_close.empty else float(today["Open"].iloc[0])
-
+        bars = pd.DataFrame({"Open": [price], "High": [price], "Low": [price], "Close": [price], "Volume": [0]})
     close = bars["Close"]
-    typical = (today["High"] + today["Low"] + today["Close"]) / 3
-    vwap = float((typical * today["Volume"]).sum() / max(today["Volume"].sum(), 1))
-    avg_vol = float(bars["Volume"].tail(100).mean()) or 1.0
-    price = float(close.iloc[-1])
-
+    typical = (bars["High"] + bars["Low"] + bars["Close"]) / 3
+    volume = bars["Volume"]
+    vwap = float((typical * volume).sum() / volume.sum()) if volume.sum() else price
+    avg_vol = float(volume.mean()) or 1.0
     return Snapshot(
-        ticker=symbol,
-        price=price,
-        change_pct_today=(price / ref - 1) * 100,
+        tradable=tradable,
+        source=source,
+        quote=quote,
+        change_pct_today=(price / ref_close - 1) * 100 if ref_close else 0.0,
         rsi_14=_rsi(close),
         sma_20=float(close.tail(20).mean()),
         sma_50=float(close.tail(50).mean()),
         vwap=vwap,
-        volume_vs_avg=float(bars["Volume"].iloc[-1]) / avg_vol,
-        day_high=float(today["High"].max()),
-        day_low=float(today["Low"].min()),
-        headlines=_headlines(ticker),
+        volume_vs_avg=float(volume.iloc[-1]) / avg_vol,
+        day_high=float(bars["High"].max()),
+        day_low=float(bars["Low"].min()),
+        bars=len(bars),
+        headlines=headlines,
     )
+
+
+class MarketData:
+    """Gemensamt gränssnitt för datakällor."""
+
+    name = "okänd"
+
+    def __init__(self) -> None:
+        self.listeners: list[QuoteListener] = []
+
+    def add_listener(self, fn: QuoteListener) -> None:
+        self.listeners.append(fn)
+
+    def _emit(self, tradable: Tradable, quote: Quote) -> None:
+        for fn in self.listeners:
+            fn(tradable, quote)
+
+    def start(self, tradables: list[Tradable]) -> None: ...
+    def quote(self, tradable: Tradable) -> Optional[Quote]: ...
+    def snapshot(self, tradable: Tradable) -> Snapshot: ...
+    def poll(self) -> None:
+        """Anropas regelbundet av huvudloopen (behövs bara för källor utan push)."""
+
+
+class NordnetMarketData(MarketData):
+    """Realtidsdata från Nordnets publika feed. Minutstaplar byggs av avslutsflödet."""
+
+    name = "Nordnet (realtid)"
+
+    def __init__(self, client) -> None:
+        super().__init__()
+        from nordnet.feed import Feed
+
+        self.client = client
+        info = client.login_info["public_feed"]
+        self.feed = Feed(info["hostname"], int(info["port"]), client.session_key, self._on_message, info.get("encrypted", True))
+        self.by_key: dict[str, Tradable] = {}
+        self.quotes: dict[str, Quote] = {}
+        self.ref_close: dict[str, float] = {}
+        self.trades: dict[str, list[tuple[float, float, float]]] = defaultdict(list)  # (ts, pris, volym)
+        self.lock = threading.Lock()
+
+    def start(self, tradables: list[Tradable]) -> None:
+        for t in tradables:
+            self.by_key[t.key] = t
+            self._seed(t)
+        self.feed.start()
+        for t in tradables:
+            self.feed.subscribe("price", t.market_id, t.identifier)
+            self.feed.subscribe("trade", t.market_id, t.identifier)
+
+    def _seed(self, t: Tradable) -> None:
+        try:
+            info = self.client.tradable_info(t).get("price_info", {}) or {}
+            self.ref_close[t.key] = float(info.get("close") or 0)
+            if info.get("last"):
+                self.quotes[t.key] = Quote(
+                    bid=float(info.get("bid") or 0), ask=float(info.get("ask") or 0), last=float(info["last"]),
+                    bid_volume=float(info.get("bid_volume") or 0), ask_volume=float(info.get("ask_volume") or 0),
+                    timestamp=time.time(),
+                )
+        except Exception as e:
+            print(f"[nordnet] kunde inte hämta info för {t.symbol}: {e}")
+        try:
+            for tr in self.client.public_trades(t):
+                self.trades[t.key].append((tr["trade_timestamp"] / 1000, float(tr["price"]), float(tr["volume"])))
+            self.trades[t.key].sort()
+        except Exception as e:
+            print(f"[nordnet] kunde inte hämta dagens avslut för {t.symbol}: {e}")
+
+    def _on_message(self, kind: str, data: dict) -> None:
+        key = f"{data.get('m')}:{data.get('i')}"
+        t = self.by_key.get(key)
+        if t is None:
+            return
+        with self.lock:
+            if kind == "price":
+                old = self.quotes.get(key) or Quote(0, 0, 0)
+                q = Quote(
+                    bid=float(data.get("bid", old.bid) or 0),
+                    ask=float(data.get("ask", old.ask) or 0),
+                    last=float(data.get("last", old.last) or 0),
+                    bid_volume=float(data.get("bid_volume", old.bid_volume) or 0),
+                    ask_volume=float(data.get("ask_volume", old.ask_volume) or 0),
+                    timestamp=time.time(),
+                )
+                if data.get("close"):
+                    self.ref_close[key] = float(data["close"])
+                self.quotes[key] = q
+            elif kind == "trade":
+                ts = float(data.get("trade_timestamp", time.time() * 1000)) / 1000
+                self.trades[key].append((ts, float(data["price"]), float(data.get("volume", 0))))
+                q = self.quotes.get(key)
+                if q:
+                    q.last = float(data["price"])
+            else:
+                return
+            quote = self.quotes.get(key)
+        if quote:
+            self._emit(t, quote)
+
+    def quote(self, tradable: Tradable) -> Optional[Quote]:
+        return self.quotes.get(tradable.key)
+
+    def _bars(self, key: str) -> pd.DataFrame:
+        with self.lock:
+            rows = list(self.trades[key])
+        if not rows:
+            return pd.DataFrame()
+        df = pd.DataFrame(rows, columns=["ts", "price", "volume"])
+        df.index = pd.to_datetime(df["ts"], unit="s")
+        today = df[df.index.date == df.index[-1].date()]
+        bars = today["price"].resample("1min").ohlc().dropna()
+        bars.columns = ["Open", "High", "Low", "Close"]
+        bars["Volume"] = today["volume"].resample("1min").sum()
+        return bars.dropna()
+
+    def _headlines(self) -> list[str]:
+        try:
+            items = self.client.news(limit=5) or []
+            return [n.get("headline") or n.get("title", "") for n in items if n.get("headline") or n.get("title")]
+        except Exception:
+            return []
+
+    def snapshot(self, tradable: Tradable) -> Snapshot:
+        quote = self.quote(tradable)
+        if quote is None:
+            raise RuntimeError(f"Inga kurser från Nordnet för {tradable.symbol} än")
+        return build_snapshot(
+            tradable, self.name, quote, self._bars(tradable.key), self.ref_close.get(tradable.key, 0.0), self._headlines()
+        )
+
+
+class YahooMarketData(MarketData):
+    """Reserv när Nordnet-API saknas. Fördröjda kurser, ingen orderbok (bid/ask uppskattas)."""
+
+    name = "Yahoo Finance (fördröjd)"
+
+    def __init__(self, spread_pct: float = 0.001) -> None:
+        super().__init__()
+        self.spread_pct = spread_pct
+        self.tradables: list[Tradable] = []
+        self.quotes: dict[str, Quote] = {}
+        self.cache: dict[str, tuple[float, pd.DataFrame, float]] = {}
+
+    def start(self, tradables: list[Tradable]) -> None:
+        self.tradables = tradables
+        self.poll()
+
+    def _history(self, t: Tradable) -> tuple[pd.DataFrame, float]:
+        import yfinance as yf
+
+        cached = self.cache.get(t.key)
+        if cached and time.time() - cached[0] < 55:
+            return cached[1], cached[2]
+        bars = yf.Ticker(t.yahoo or t.symbol).history(period="5d", interval="1m")
+        if bars.empty:
+            raise RuntimeError(f"Ingen kursdata för {t.yahoo or t.symbol}")
+        last_day = bars.index[-1].date()
+        before = bars[bars.index.date < last_day]["Close"]
+        today = bars[bars.index.date == last_day]
+        ref = float(before.iloc[-1]) if not before.empty else float(today["Open"].iloc[0])
+        self.cache[t.key] = (time.time(), today, ref)
+        return today, ref
+
+    def poll(self) -> None:
+        for t in self.tradables:
+            try:
+                bars, _ = self._history(t)
+            except Exception as e:
+                print(f"[yahoo] {t.symbol}: {e}")
+                continue
+            last = float(bars["Close"].iloc[-1])
+            half = last * self.spread_pct / 2
+            q = Quote(bid=last - half, ask=last + half, last=last, timestamp=time.time())
+            self.quotes[t.key] = q
+            self._emit(t, q)
+
+    def quote(self, tradable: Tradable) -> Optional[Quote]:
+        return self.quotes.get(tradable.key)
+
+    def snapshot(self, tradable: Tradable) -> Snapshot:
+        import yfinance as yf
+
+        bars, ref = self._history(tradable)
+        quote = self.quotes.get(tradable.key)
+        if quote is None:
+            raise RuntimeError(f"Inga kurser för {tradable.symbol}")
+        try:
+            news = yf.Ticker(tradable.yahoo or tradable.symbol).news or []
+            headlines = [n.get("title") or n.get("content", {}).get("title") for n in news[:5]]
+        except Exception:
+            headlines = []
+        return build_snapshot(tradable, self.name, quote, bars, ref, [h for h in headlines if h])
+
+
+def market_is_open(now: Optional[datetime] = None, open_hm: str = "09:00", close_hm: str = "17:30") -> bool:
+    now = now or datetime.now()
+    if now.weekday() >= 5:
+        return False
+    hm = now.strftime("%H:%M")
+    return open_hm <= hm < close_hm
