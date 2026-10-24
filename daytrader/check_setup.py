@@ -63,11 +63,38 @@ def check_claude_api() -> bool:
     return False
 
 
+def check_data() -> bool:
+    print("\n2. Kursdata")
+    from market import EODHDMarketData, TwelveDataMarketData
+    from orders import Tradable
+
+    found = False
+    for env_key, cls, symbol in (("TWELVEDATA_API_KEY", TwelveDataMarketData, "INVE B"),
+                                 ("EODHD_API_KEY", EODHDMarketData, "VOLV B")):
+        key = config.env(env_key)
+        if not key:
+            continue
+        found = True
+        t = Tradable(symbol=symbol, market_id=0, identifier=symbol)
+        try:
+            bars, ref, last = cls(key)._fetch(t)
+            price = last or float(bars["Close"].iloc[-1])
+            print(f"   OK – {cls.name}: {symbol} senast {price:.2f} ({len(bars)} minutstaplar idag, igår {ref:.2f})")
+        except Exception as e:
+            print(f"   FEL – {cls.name}: {e}")
+            if cls is TwelveDataMarketData:
+                print("   Tips: gratisnyckeln täcker bara testaktien INVE B. Övriga Stockholmsaktier kräver Pro-planen.")
+            return False
+    if not found and not config.nordnet_configured():
+        print("   FEL: ingen datakälla. Ange TWELVEDATA_API_KEY eller EODHD_API_KEY i .env (se README).")
+        return False
+    return True
+
+
 def check_nordnet() -> bool:
-    print("\n2. Nordnet API")
+    print("\n3. Nordnet API")
     if not config.nordnet_configured():
-        print("   Hoppar över: NORDNET_API_KEY / NORDNET_PRIVATE_KEY saknas i .env.")
-        print("   Programmet använder då Yahoo Finance för kurser (fördröjda).")
+        print("   Hoppar över: NORDNET_API_KEY / NORDNET_PRIVATE_KEY saknas (Nordnet tar inte in nya API-kunder just nu).")
         return True
     client = config.make_nordnet_client()
     try:
@@ -92,6 +119,6 @@ def check_nordnet() -> bool:
 
 if __name__ == "__main__":
     config.load_env()
-    ok = check_ai() & check_nordnet()
+    ok = check_ai() & check_data() & check_nordnet()
     print("\nAllt klart!" if ok else "\nÅtgärda felen ovan och kör igen.")
     sys.exit(0 if ok else 1)

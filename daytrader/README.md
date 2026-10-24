@@ -1,123 +1,117 @@
-# Claude-daytrader för Nordnet
+# Handelsrådet – AI-agenter som daytradar
 
-Fem Claude-agenter diskuterar varje aktie och fattar beslut som skickas som
-Nordnet-order. Standard är **pappershandel med riktiga kurser från Nordnet**.
+Fem AI-agenter diskuterar varje aktie och fattar beslut som blir order. Standard är
+**pappershandel**: riktiga kurser, låtsaspengar. Allt följs och styrs från en webbsida.
 
 | Agent | Roll |
 |---|---|
 | **Tekla** | Teknisk analytiker (RSI, glidande medelvärden, VWAP, orderbok) |
 | **Moa** | Momentum- och trendstrateg (uppåt och nedåt) |
 | **Nils** | Nyhets- och sentimentanalytiker |
-| **Rut** | Riskhanterare (storlek, stop-loss, trailing, vinstmål) |
+| **Rut** | Riskhanterare (storlek, stop-loss, vinstmål och avgifter) |
 | **Djävulens advokat** | Alltid negativ – säger emot och försöker övertala de andra |
 
-## Steg 1: Välj AI-motor
-
-Välj med `LLM_BACKEND` i `.env` eller `--backend`:
-
-| Motor | Kostnad | Kvalitet | Så kommer du igång |
-|---|---|---|---|
-| `ollama` (standard) | Gratis, körs på din dator | Sämre än Claude | Installera [Ollama](https://ollama.com), kör `ollama pull qwen2.5:14b` |
-| `claude-code` | Ingår i Claude Pro/Max | Claude | Installera [Claude Code](https://claude.com/claude-code), kör `claude` en gång och logga in |
-| `api` | API-krediter (~0,10 kr per möte med Haiku 5.5) | Claude | Nyckel från [platform.claude.com](https://platform.claude.com) i `ANTHROPIC_API_KEY` |
-
-**Ollama:** `qwen2.5:14b` behöver ungefär 10 GB grafikminne eller 16 GB RAM och är
-långsam utan grafikkort. På en svagare dator, välj `qwen2.5:7b` (`--ollama-model qwen2.5:7b`).
-Lokala modeller svarar ibland med felaktigt format. Då frågar programmet om en gång, och
-lyckas det inte heller räknas rösten som HOLD.
-
-**Claude Code:** prenumerationen har användningsgränser per femtimmarsperiod. Med många
-möten kan du nå gränsen, och då pausar rådet. Kör färre möten (`--interval 30 --rounds 1`)
-eller välj `CLAUDE_MODEL=claude-sonnet-5-5`, som räcker längre. Programmet tar bort
-`ANTHROPIC_API_KEY` när det anropar `claude`, så att prenumerationen används och inte krediter.
-
-## Steg 2: Nordnet API
-
-Nordnet har ett officiellt API för privatkunder ([dokumentation](https://www.nordnet.se/externalapi/docs/getting_started)).
-Det används här i stället för att avlyssna webbplatsens interna anrop. Det är tillåtet,
-stabilt och ger realtidskurser.
-
-1. **Ansök om API-åtkomst** hos Nordnet Trading Support (tradingsupport@nordnet.se,
-   010-583 31 99). Enligt Nordnets dokumentation tar de för närvarande inte alltid in nya
-   API-kunder, så fråga om status. Det kan också tillkomma en avgift. API:t kopplas till
-   det konto du anger, och det kontot måste vara förvalt i din profil.
-2. Skapa en nyckel:
-   ```bash
-   ssh-keygen -t ed25519 -f ~/.ssh/nordnet_ed25519 -N ""
-   ```
-3. Ladda upp `~/.ssh/nordnet_ed25519.pub` på nordnet.se: **Mina sidor → Inställningar →
-   Min profil → Säkerhet**. Kopiera API-nyckeln (UUID) som visas.
-4. Fyll i `NORDNET_API_KEY` och `NORDNET_PRIVATE_KEY` i `.env`.
-
-Inloggningen sker sedan automatiskt med nyckeln, utan BankID varje gång. Sessionen
-förnyas av programmet.
-
-**Utan Nordnet-API** fungerar allt ändå, men med fördröjda kurser från Yahoo Finance
-(ange då Yahoo-symbol: `"VOLV B=VOLV-B.ST"`).
-
-## Steg 3: Kör
+## Kom igång
 
 ```bash
+cd daytrader
 pip install -r requirements.txt
-cp .env.example .env        # fyll i nycklarna
-python check_setup.py       # testar AI-motorn och Nordnet
-
-python main.py --tickers "VOLV B=VOLV-B.ST" "ERIC B=ERIC-B.ST"
-python main.py --tickers "VOLV B" --interval 0 --ignore-hours   # ett möte, för test
+cp .env.example .env          # fyll i nycklar, se nedan
+python check_setup.py         # testar AI-motor och datakälla
+python main.py                # öppna sedan http://localhost:8000
 ```
 
-## Så fungerar det
+## 1. Kursdata
 
-1. Kurser strömmar in (Nordnets realtidsflöde eller Yahoo). Pappersmäklaren
-   kontrollerar order mot riktiga köp- och säljkurser hela tiden.
-2. Var `--interval` minut håller rådet möte för varje aktie: analytikerna talar, djävulens
-   advokat angriper, i `--rounds` rundor.
-3. Analytikerna röstar: **BUY, SELL, SHORT, COVER eller HOLD**, med ordertyp,
-   limitpris, stop-loss, vinstmål och trailing stop. Minst `--min-agree` (3 av 4)
-   måste vara överens.
-4. När en position finns läggs skydd direkt som Nordnet-order:
-   - **OCO** (vinstmål + stop-loss) om rådet satt ett vinstmål
-   - **Trailing stop** (`STOP_ACTPRICE_PERC`) om rådet valt det
-   - Annars en vanlig **stop-loss** (`STOP_ACTPRICE`)
-5. Hårda regler i koden: max positionsstorlek, högsta stop-loss, maxförlust per dag och
-   att allt stängs vid `--close-at`.
+| Källa | Stockholmsbörsen | Kostnad | Nyckel i `.env` |
+|---|---|---|---|
+| [Twelve Data](https://twelvedata.com) | Realtid på Pro-planen. Gratisnyckeln täcker bara testaktien INVE B | Gratis för test, Pro för riktig användning | `TWELVEDATA_API_KEY` |
+| [EODHD](https://eodhd.com) | ~15 min fördröjning, plus nyhetsrubriker | Från ca 20 USD/mån ("All World Extended") | `EODHD_API_KEY` |
+| Nordnet API | Realtid med orderbok | Tar inte in nya API-kunder just nu | `NORDNET_API_KEY` |
 
-### Nordnet-funktioner som stöds
+Med `data_source = auto` väljs Nordnet om det finns, annars Twelve Data, annars EODHD.
+För att testa gratis: skaffa en gratisnyckel hos Twelve Data och bevaka `INVE B`.
 
-| Nordnet | Pappershandel | Live |
+Skriv aktier som på Nordnet (`VOLV B`). Programmet gör om namnet till källans format
+(`VOLV.B` hos Twelve Data, `VOLV-B.ST` hos EODHD). Vill du ange symbolen själv skriver
+du `VOLV B=VOLV-B.ST`.
+
+## 2. AI-motor
+
+| Motor | Kostnad | Så kommer du igång |
 |---|---|---|
-| Ordertyper LIMIT, NORMAL, FAK, FOK | ✅ simuleras mot bid/ask och volym | ✅ |
-| Stop-loss (`STOP_ACTPRICE`) | ✅ | ✅ |
-| Trailing stop (`STOP_ACTPRICE_PERC`) | ✅ | ✅ |
-| OCO, vinstmål + stop (`OCO_STOP_ACTPRICE`) | ✅ | ✅ |
-| Vilande order (`MANUAL`) | ✅ | ✅ |
-| Blankning | ✅ med säkerhetskrav (`--shortable` begränsar) | ✅ om kontot har blankningsavtal |
-| Courtage | ✅ ställ in din klass med `--courtage-pct` och `--courtage-min` | Nordnet drar |
-| Dagsorder upphör | ✅ | ✅ |
+| `ollama` (standard) | Gratis, körs på din dator | Installera [Ollama](https://ollama.com), kör `ollama pull qwen2.5:14b` (eller `qwen2.5:7b` på svagare dator) |
+| `claude-code` | Ingår i Claude Pro/Max | Installera Claude Code, kör `claude` en gång och logga in |
+| `api` | API-krediter (~0,10 kr per möte med Haiku 5.5, ~5 kr med Opus 5.5) | Nyckel från platform.claude.com i `ANTHROPIC_API_KEY` |
 
-## Live-handel (senare)
+Lokala modeller svarar ibland i fel format. Då frågas de igen, och annars räknas rösten
+som HOLD. Prenumerationen i Claude Code har användningsgränser, så vid många möten kan
+rådet pausas tills gränsen återställs.
 
-```bash
-# i .env: NORDNET_LIVE_CONFIRM=JA
-python main.py --tickers "VOLV B" --live --max-order-value 5000
-```
+## 3. Webbsidan
 
-Två spärrar krävs: flaggan `--live` och `NORDNET_LIVE_CONFIRM=JA`. `--max-order-value`
-stoppar för stora order. Kontrollera innan du går live:
+Öppna `http://localhost:8000` medan boten kör.
 
-- **Tickstorlek:** limitpriser avrundas till 2 decimaler, men Nordnet kräver att priset
-  följer papperets tickstorlek, annars avvisas ordern.
-- **Trailing stop:** att `target_value` är en procentavvikelse för limitpriset är ett
-  antagande. Kontrollera det mot Nordnets dokumentation.
-- **Blankning:** att ditt konto (vanligen en aktie- och fonddepå, inte ISK/KF) och
-  aktien tillåter blankning.
-- **Prova först:** kör en vecka på papper med Nordnet-data.
+- **Översikt:** eget kapital, dagens och totalt resultat, avgifter, graf över utvecklingen,
+  positioner (med "netto om stängd nu"), öppna order, kurser och **diskussionen live**
+  medan agenterna talar.
+- **Möten:** alla möten med röster, motiveringar, hela diskussionen och underlaget.
+- **Affärer:** varje avslutad affär med brutto, avgifter och netto. Klicka på en affär
+  för att se mötet som ledde till den. Statistiken visar vinstandel, snittvinst och
+  snittförlust, och hur ofta djävulens advokat övertalade någon.
+- **Avgifter:** vart pengarna gått (courtage, valuta, spread, låneavgift), hur mycket av
+  vinsten avgifterna åt upp och hur rådet räknar just nu.
+- **Inställningar:** aktier, mötesintervall, AI-motor, riskgränser, courtageklass med
+  mera. Ändringarna gäller direkt, utom de som är märkta "kräver omstart".
+- **Knappar:** *Möte nu* startar ett möte direkt. *Pausa* stoppar nya affärer och
+  schemalagda möten, men skyddsorder och stängningen vid dagens slut fortsätter.
+
+**Från mobilen** på samma wifi: starta med `python main.py --host 0.0.0.0 --token
+ditt-lösenord` och öppna `http://<datorns-ip>:8000/?token=ditt-lösenord`. Utan
+lösenord startar sidan bara på den egna datorn. Lägg aldrig ut sidan på internet,
+eftersom den styr handeln.
+
+## 4. Avgifter och hur de påverkar vinsten
+
+Boten räknar med alla kostnader för att köpa och sälja:
+
+| Kostnad | Hur |
+|---|---|
+| **Courtage** | Nordnets klasser: Mini 0,25 % (min 1 kr), Liten 0,15 % (min 39 kr), Mellan 0,069 % (min 69 kr), Fast 99 kr, eller Gratis (kampanj). Välj din klass under Inställningar. |
+| **Spread** | Du köper på säljkursen och säljer på köpkursen. Kommer ur orderboken, eller uppskattas (standard 0,10 %) när källan saknar den. |
+| **Valutaväxling** | 0,25 % per affär för aktier i annan valuta än SEK. |
+| **Låneavgift** | Blankningar som ligger kvar över natten (standard 3 % per år). |
+| **Skatt** | Med kontotyp AF räknas 30 % skatt på vinst i statistiken. ISK har ingen skatt per affär. |
+
+Så används avgifterna:
+
+1. **Agenterna får en avgiftskalkyl i varje möte**: hur mycket kursen måste röra sig bara
+   för att gå jämnt ut, och om ordern är så liten att minimicourtaget blir dyrt.
+2. **En hård regel stoppar olönsamma affärer.** Vinstmålet måste vara minst
+   `min_edge_multiple` gånger avgifterna (standard 2×), och en stop-loss får inte vara
+   snävare än avgifterna. Exempel med Mini på 10 000 kr: kursen måste upp 0,6 % för att gå
+   jämnt ut, så ett vinstmål under 1,2 % stoppas även om rådet röstat för affären.
+3. **Allt redovisas brutto och netto** på webbsidan, inklusive hur många affärer som var
+   vinst före avgifter men förlust efter.
+
+## Hur ett möte går till
+
+1. Kurser hämtas varje minut, och pappersmäklaren prövar order mot köp- och säljkurs.
+2. Var `interval` minut (standard 15) håller rådet möte för varje aktie i `rounds` rundor.
+3. Analytikerna röstar: **BUY, SELL, SHORT, COVER eller HOLD**, med storlek, ordertyp,
+   stop-loss, vinstmål och trailing stop. Minst 3 av 4 måste vara överens.
+4. Avgiftsregeln prövas, och sedan läggs ordern. Skydd läggs direkt: **vinstmål + stop
+   (OCO)**, **trailing stop** eller vanlig **stop-loss**.
+5. Hårda gränser som agenterna inte kan ändra: max positionsstorlek, högsta stop-loss,
+   max dagsförlust och att allt stängs vid `close_at`.
+
+Allt sparas i mappen `data/`: `portfolio.json`, `settings.json`, `meetings.jsonl` och
+`history.jsonl`.
+
+## Live-handel
+
+Koden för riktiga order via Nordnet finns (`--live` plus `NORDNET_LIVE_CONFIRM=JA`) men
+kräver Nordnets API, som just nu är stängt för nya kunder.
 
 > ⚠️ Daytrading innebär stor risk och de flesta förlorar pengar. Programmet är ett
 > experiment, inte finansiell rådgivning.
-
-## Kostnad med `--backend api`
-
-Ett möte kostar `5 × rundor + 4` anrop per aktie (14 med standardinställningar).
-Ungefärlig kostnad per möte och aktie: Opus 5.5 ~5 kr, Sonnet 5.5 ~2,5 kr,
-Haiku 5.5 ~0,10 kr. Med `ollama` eller `claude-code` kostar det inga krediter.

@@ -1,4 +1,5 @@
 __pycache__/
 *.pyc
-daytrader/portfolio.json
 daytrader/.env
+daytrader/data/
+daytrader/portfolio.json

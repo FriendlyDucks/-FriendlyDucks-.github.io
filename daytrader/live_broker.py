@@ -51,6 +51,8 @@ class NordnetLiveBroker:
         self.day = ""
         self.start_of_day_equity = self.equity()
         self.realized_today = 0.0
+        self.listener = None
+        self.starting_cash = self.start_of_day_equity
 
     def on_quote(self, tradable: Tradable, quote: Quote) -> None:
         self.last_quotes[tradable.key] = quote
@@ -97,6 +99,26 @@ class NordnetLiveBroker:
 
     def save(self) -> None:
         pass  # Nordnet är källan till sanningen
+
+    def state_dict(self) -> dict:
+        equity = self.equity()
+        positions = []
+        for p in self.client.positions(self.accid):
+            inst = p.get("instrument", {})
+            qty, acq = _num(p.get("qty")), _num(p.get("acq_price"))
+            value = _num(p.get("market_value"))
+            positions.append({"papper": inst.get("symbol", str(inst)), "antal": qty, "snitt": acq,
+                              "senast": value / qty if qty else 0, "orealiserat": round(value - qty * acq, 2)})
+        orders = [{"id": o.order_id, "papper": o.key, "sida": o.side, "antal": o.volume, "status": o.state}
+                  for o in self.open_orders()]
+        return {
+            "mäklare": self.name, "eget_kapital": round(equity, 2), "kontanter": None,
+            "startkapital": self.starting_cash, "totalt_resultat": round(equity - self.starting_cash, 2),
+            "dagens_resultat": round(equity - self.start_of_day_equity, 2),
+            "dagens_resultat_pct": round((equity / self.start_of_day_equity - 1) * 100, 3) if self.start_of_day_equity else 0,
+            "avgifter_totalt": {}, "positioner": positions, "öppna_order": orders,
+            "statistik": {}, "avslutade_affärer": [], "orderlogg": [],
+        }
 
     def summary_text(self) -> str:
         lines = [f"Konto {self.accid}, eget kapital: {self.equity():,.2f}"]

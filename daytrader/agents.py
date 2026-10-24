@@ -13,7 +13,9 @@ Möjliga beslut: BUY (köpa/öka lång position), SELL (stänga lång position),
 COVER (köpa tillbaka blankade aktier) eller HOLD (göra ingenting).
 Ordertyper: LIMIT (ligger kvar i orderboken), FAK (fyll det som går direkt), FOK (allt eller inget direkt).
 Skydd som läggs direkt efter köp/blankning: stop-loss, trailing stop eller vinstmål + stop (OCO).
-Tänk på spread, courtage och att positioner ska vara stängda innan börsen stänger.
+Väg alltid in avgifterna (courtage, spread, valutaväxling, låneavgift vid blankning, ev. skatt):
+en affär är bara bra om den förväntade rörelsen klart överstiger det kursen måste röra sig för att gå
+jämnt ut. Små rörelser äts upp av avgifterna. Positioner ska vara stängda innan börsen stänger.
 Håll varje inlägg under 120 ord. Tilltala de andra agenterna vid namn när du bemöter dem.
 Hitta inte på siffror – använd bara marknadsdatan och det som sagts i diskussionen."""
 
@@ -59,8 +61,9 @@ ANALYSTS = [
         name="Rut",
         role="Riskhanterare",
         persona=(
-            "Du fokuserar på positionsstorlek, stop-loss, trailing stop, vinstmål och risk/reward. Du är positiv "
-            "till affärer med bra riskprofil och föreslår storlek, ordertyp och skyddsnivåer."
+            "Du fokuserar på positionsstorlek, stop-loss, trailing stop, vinstmål och risk/reward efter avgifter. "
+            "Räkna på om vinstmålet täcker courtage och spread med marginal, och om positionen är så liten att "
+            "minimicourtaget blir dyrt. Föreslå storlek, ordertyp och skyddsnivåer."
         ),
     ),
 ]
@@ -142,7 +145,8 @@ class Council:
     def _ask(self, agent: Agent, prompt: str, schema: dict | None = None) -> str:
         return self.backend.complete(agent.system, prompt, schema)
 
-    def debate(self, snapshot_text: str, portfolio_text: str, rounds: int) -> list[tuple[str, str]]:
+    def debate(self, snapshot_text: str, portfolio_text: str, rounds: int, fees_text: str = "",
+               on_message=None) -> list[tuple[str, str]]:
         transcript: list[tuple[str, str]] = []
 
         def render() -> str:
@@ -166,18 +170,24 @@ class Council:
                         "eller har du blivit övertalad? Motivera."
                     )
                 prompt = (
-                    f"MARKNADSDATA\n{snapshot_text}\n\nPORTFÖLJ\n{portfolio_text}\n\n"
+                    f"MARKNADSDATA\n{snapshot_text}\n\nPORTFÖLJ\n{portfolio_text}\n\nAVGIFTER\n{fees_text}\n\n"
                     f"DISKUSSION HITTILLS\n{render()}\n\nDIN UPPGIFT\n{task}"
                 )
+                if on_message:
+                    on_message({"typ": "tänker", "agent": agent.name, "roll": agent.role, "runda": rnd})
                 message = self._ask(agent, prompt)
                 transcript.append((agent.name, message))
                 print(f"\n[{agent.name} – {agent.role}]\n{message}")
+                if on_message:
+                    on_message({"typ": "inlägg", "agent": agent.name, "roll": agent.role, "runda": rnd,
+                                "text": message, "djävul": agent is DEVIL})
         return transcript
 
-    def vote(self, snapshot_text: str, portfolio_text: str, transcript: list[tuple[str, str]]) -> dict[str, dict]:
+    def vote(self, snapshot_text: str, portfolio_text: str, transcript: list[tuple[str, str]],
+             fees_text: str = "") -> dict[str, dict]:
         discussion = "\n\n".join(f"[{who}]: {msg}" for who, msg in transcript)
         prompt = (
-            f"MARKNADSDATA\n{snapshot_text}\n\nPORTFÖLJ\n{portfolio_text}\n\n"
+            f"MARKNADSDATA\n{snapshot_text}\n\nPORTFÖLJ\n{portfolio_text}\n\nAVGIFTER\n{fees_text}\n\n"
             f"HELA DISKUSSIONEN\n{discussion}\n\n"
             "Diskussionen är slut. Lägg din slutliga röst med ordertyp och skyddsnivåer."
         )

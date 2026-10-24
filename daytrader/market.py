@@ -1,4 +1,4 @@
-"""Marknadsdata från Nordnet (realtid via feed) med Yahoo Finance som reserv."""
+"""Marknadsdata: Nordnet (realtid via feed), Twelve Data eller EODHD."""
 
 from __future__ import annotations
 
@@ -224,67 +224,159 @@ class NordnetMarketData(MarketData):
         )
 
 
-class YahooMarketData(MarketData):
-    """Reserv när Nordnet-API saknas. Fördröjda kurser, ingen orderbok (bid/ask uppskattas)."""
+class PollingMarketData(MarketData):
+    """Bas för datakällor som hämtas med jämna mellanrum över HTTP (utan orderbok)."""
 
-    name = "Yahoo Finance (fördröjd)"
+    refresh_seconds = 60
 
-    def __init__(self, spread_pct: float = 0.001) -> None:
+    def __init__(self, api_key: str, spread_pct: float = 0.10) -> None:
         super().__init__()
+        if not api_key:
+            raise RuntimeError(f"API-nyckel saknas för {self.name}")
+        self.api_key = api_key
         self.spread_pct = spread_pct
         self.tradables: list[Tradable] = []
         self.quotes: dict[str, Quote] = {}
-        self.cache: dict[str, tuple[float, pd.DataFrame, float]] = {}
+        self.bars: dict[str, tuple[float, pd.DataFrame, float]] = {}  # nyckel -> (hämtad, dagens staplar, gårdagens stängning)
+        self.news: dict[str, tuple[float, list[str]]] = {}
+        self.requests_today = 0
+        self.last_error = ""
 
     def start(self, tradables: list[Tradable]) -> None:
-        self.tradables = tradables
+        self.tradables = list(tradables)
         self.poll()
 
-    def _history(self, t: Tradable) -> tuple[pd.DataFrame, float]:
-        import yfinance as yf
+    def _get(self, url: str, params: dict) -> object:
+        import requests
 
-        cached = self.cache.get(t.key)
-        if cached and time.time() - cached[0] < 55:
-            return cached[1], cached[2]
-        bars = yf.Ticker(t.yahoo or t.symbol).history(period="5d", interval="1m")
-        if bars.empty:
-            raise RuntimeError(f"Ingen kursdata för {t.yahoo or t.symbol}")
+        self.requests_today += 1
+        r = requests.get(url, params=params, timeout=20)
+        if r.status_code >= 400:
+            raise RuntimeError(f"{self.name} svarade {r.status_code}: {r.text[:200]}")
+        return r.json()
+
+    def _fetch(self, t: Tradable) -> tuple[pd.DataFrame, float, Optional[float]]:
+        """Returnerar (dagens minutstaplar, gårdagens stängningskurs, senaste pris om separat)."""
+        raise NotImplementedError
+
+    def _fetch_news(self, t: Tradable) -> list[str]:
+        return []
+
+    @staticmethod
+    def _split_days(bars: pd.DataFrame) -> tuple[pd.DataFrame, float]:
+        bars = bars.sort_index()
         last_day = bars.index[-1].date()
-        before = bars[bars.index.date < last_day]["Close"]
         today = bars[bars.index.date == last_day]
+        before = bars[bars.index.date < last_day]["Close"]
         ref = float(before.iloc[-1]) if not before.empty else float(today["Open"].iloc[0])
-        self.cache[t.key] = (time.time(), today, ref)
         return today, ref
 
     def poll(self) -> None:
         for t in self.tradables:
-            try:
-                bars, _ = self._history(t)
-            except Exception as e:
-                print(f"[yahoo] {t.symbol}: {e}")
+            cached = self.bars.get(t.key)
+            if cached and time.time() - cached[0] < self.refresh_seconds:
                 continue
-            last = float(bars["Close"].iloc[-1])
-            half = last * self.spread_pct / 2
-            q = Quote(bid=last - half, ask=last + half, last=last, timestamp=time.time())
+            try:
+                today, ref, last = self._fetch(t)
+                self.bars[t.key] = (time.time(), today, ref)
+                self.last_error = ""
+            except Exception as e:
+                self.last_error = f"{t.symbol}: {e}"
+                print(f"[{self.name}] {self.last_error}")
+                continue
+            price = last if last else float(today["Close"].iloc[-1])
+            half = price * self.spread_pct / 100 / 2
+            q = Quote(bid=price - half, ask=price + half, last=price, timestamp=time.time())
             self.quotes[t.key] = q
             self._emit(t, q)
 
     def quote(self, tradable: Tradable) -> Optional[Quote]:
         return self.quotes.get(tradable.key)
 
-    def snapshot(self, tradable: Tradable) -> Snapshot:
-        import yfinance as yf
-
-        bars, ref = self._history(tradable)
-        quote = self.quotes.get(tradable.key)
-        if quote is None:
-            raise RuntimeError(f"Inga kurser för {tradable.symbol}")
+    def _headlines(self, t: Tradable) -> list[str]:
+        cached = self.news.get(t.key)
+        if cached and time.time() - cached[0] < 900:
+            return cached[1]
         try:
-            news = yf.Ticker(tradable.yahoo or tradable.symbol).news or []
-            headlines = [n.get("title") or n.get("content", {}).get("title") for n in news[:5]]
+            items = self._fetch_news(t)
         except Exception:
-            headlines = []
-        return build_snapshot(tradable, self.name, quote, bars, ref, [h for h in headlines if h])
+            items = []
+        self.news[t.key] = (time.time(), items)
+        return items
+
+    def snapshot(self, tradable: Tradable) -> Snapshot:
+        cached = self.bars.get(tradable.key)
+        quote = self.quotes.get(tradable.key)
+        if not cached or quote is None:
+            raise RuntimeError(f"Inga kurser för {tradable.symbol} än ({self.last_error or 'väntar på data'})")
+        return build_snapshot(tradable, self.name, quote, cached[1], cached[2], self._headlines(tradable))
+
+
+class TwelveDataMarketData(PollingMarketData):
+    """Twelve Data (twelvedata.com). Stockholmsbörsen (XSTO) i realtid kräver Pro-planen;
+    med gratisnyckeln fungerar testaktien INVE.B."""
+
+    name = "Twelve Data"
+    url = "https://api.twelvedata.com"
+
+    def __init__(self, api_key: str, spread_pct: float = 0.10, exchange: str = "XSTO") -> None:
+        super().__init__(api_key, spread_pct)
+        self.exchange = exchange
+
+    @staticmethod
+    def symbol_for(t: Tradable) -> str:
+        return t.data_symbol or t.symbol.replace(" ", ".")
+
+    def _fetch(self, t: Tradable) -> tuple[pd.DataFrame, float, Optional[float]]:
+        data = self._get(f"{self.url}/time_series", {
+            "symbol": self.symbol_for(t), "exchange": self.exchange, "interval": "1min",
+            "outputsize": 1000, "timezone": "Europe/Stockholm", "apikey": self.api_key,
+        })
+        if not isinstance(data, dict) or data.get("status") != "ok":
+            raise RuntimeError(data.get("message", data) if isinstance(data, dict) else data)
+        df = pd.DataFrame(data["values"])
+        df.index = pd.to_datetime(df["datetime"])
+        df = df[["open", "high", "low", "close", "volume"]].astype(float)
+        df.columns = ["Open", "High", "Low", "Close", "Volume"]
+        today, ref = self._split_days(df)
+        return today, ref, None
+
+
+class EODHDMarketData(PollingMarketData):
+    """EOD Historical Data (eodhd.com). Stockholmsaktier har cirka 15 minuters fördröjning."""
+
+    name = "EODHD (fördröjd ~15 min)"
+    url = "https://eodhd.com/api"
+
+    @staticmethod
+    def symbol_for(t: Tradable) -> str:
+        return t.data_symbol or t.symbol.replace(" ", "-") + ".ST"
+
+    def _fetch(self, t: Tradable) -> tuple[pd.DataFrame, float, Optional[float]]:
+        sym = self.symbol_for(t)
+        rows = self._get(f"{self.url}/intraday/{sym}", {
+            "interval": "1m", "from": int(time.time()) - 4 * 86400, "api_token": self.api_key, "fmt": "json",
+        })
+        if not isinstance(rows, list) or not rows:
+            raise RuntimeError(f"inga minutdata för {sym}: {rows}")
+        df = pd.DataFrame(rows)
+        df.index = pd.to_datetime(df["timestamp"], unit="s", utc=True).tz_convert("Europe/Stockholm").tz_localize(None)
+        df = df[["open", "high", "low", "close", "volume"]].astype(float)
+        df.columns = ["Open", "High", "Low", "Close", "Volume"]
+        today, ref = self._split_days(df)
+        rt = self._get(f"{self.url}/real-time/{sym}", {"api_token": self.api_key, "fmt": "json"})
+        last = None
+        if isinstance(rt, dict):
+            try:
+                last = float(rt["close"])
+                ref = float(rt.get("previousClose") or ref)
+            except (KeyError, TypeError, ValueError):
+                pass
+        return today, ref, last
+
+    def _fetch_news(self, t: Tradable) -> list[str]:
+        items = self._get(f"{self.url}/news", {"s": self.symbol_for(t), "limit": 5, "api_token": self.api_key, "fmt": "json"})
+        return [i["title"] for i in items if isinstance(i, dict) and i.get("title")] if isinstance(items, list) else []
 
 
 def market_is_open(now: Optional[datetime] = None, open_hm: str = "09:00", close_hm: str = "17:30") -> bool:

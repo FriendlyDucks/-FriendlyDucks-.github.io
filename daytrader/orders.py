@@ -47,7 +47,7 @@ class Tradable:
     identifier: str  # Nordnets id för värdepappret på marknaden
     currency: str = "SEK"
     lot_size: int = 1
-    yahoo: Optional[str] = None  # Reservkälla för kursdata, t.ex. "VOLV-B.ST"
+    data_symbol: Optional[str] = None  # Symbol hos datakällan om den skiljer sig, t.ex. "VOLV-B.ST"
 
     @property
     def key(self) -> str:

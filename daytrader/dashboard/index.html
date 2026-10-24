@@ -1,0 +1,409 @@
+<!doctype html>
+<html lang="sv">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Handelsrådet</title>
+<link rel="icon" href="/favicon.ico" type="image/svg+xml">
+<style>
+:root {
+  --bg: #f6f7f9; --panel: #ffffff; --text: #16181d; --muted: #646b78; --line: #e3e6eb;
+  --accent: #2f6fdf; --pos: #13804f; --neg: #c63b3b; --warn: #b7791f; --devil: #fdecec; --devil-line: #e9a3a3;
+  --bubble: #f1f4f9; --shadow: 0 1px 2px rgba(0,0,0,.06);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f1115; --panel: #171a21; --text: #e7e9ee; --muted: #9aa2b1; --line: #2a2f3a;
+    --accent: #6c9cff; --pos: #3ccf8e; --neg: #ff7a7a; --warn: #f0b85a; --devil: #2a1719; --devil-line: #6b2f33;
+    --bubble: #1f2430; --shadow: none;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+header { position: sticky; top: 0; z-index: 5; background: var(--panel); border-bottom: 1px solid var(--line); }
+.bar { max-width: 1280px; margin: 0 auto; padding: 10px 16px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+h1 { font-size: 17px; margin: 0 8px 0 0; }
+.pill { padding: 2px 9px; border-radius: 999px; font-size: 12px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
+.pill.paper { color: var(--accent); border-color: var(--accent); }
+.pill.live { color: #fff; background: var(--neg); border-color: var(--neg); }
+.pill.err { color: var(--neg); border-color: var(--neg); }
+.spacer { flex: 1; }
+button { font: inherit; border: 1px solid var(--line); background: var(--panel); color: var(--text); padding: 6px 12px; border-radius: 8px; cursor: pointer; }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button.danger { color: var(--neg); border-color: var(--neg); }
+nav { max-width: 1280px; margin: 0 auto; padding: 0 16px; display: flex; gap: 4px; overflow-x: auto; }
+nav a { padding: 8px 12px; color: var(--muted); text-decoration: none; border-bottom: 2px solid transparent; white-space: nowrap; cursor: pointer; }
+nav a.active { color: var(--text); border-color: var(--accent); }
+main { max-width: 1280px; margin: 0 auto; padding: 16px; }
+.grid { display: grid; gap: 12px; }
+.kpis { grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); }
+.two { grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr); }
+@media (max-width: 900px) { .two { grid-template-columns: minmax(0, 1fr); } }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px; box-shadow: var(--shadow); min-width: 0; }
+.card h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 0 0 10px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+.kpi .v { font-size: 22px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.kpi .s { color: var(--muted); font-size: 12px; }
+.pos { color: var(--pos); } .neg { color: var(--neg); } .muted { color: var(--muted); }
+table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+th { color: var(--muted); font-weight: 500; font-size: 12px; }
+td.r, th.r { text-align: right; }
+.scroll { overflow-x: auto; }
+tr.click { cursor: pointer; } tr.click:hover td { background: var(--bubble); }
+#chart { width: 100%; height: 220px; display: block; }
+.feed { max-height: 520px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
+.msg { background: var(--bubble); border-radius: 10px; padding: 8px 10px; border: 1px solid transparent; }
+.msg.devil { background: var(--devil); border-color: var(--devil-line); }
+.msg .who { font-weight: 600; font-size: 12px; margin-bottom: 2px; }
+.msg .txt { white-space: pre-wrap; overflow-wrap: anywhere; }
+.msg.sys { background: transparent; border: 1px dashed var(--line); color: var(--muted); font-size: 12px; }
+.decision { border-left: 4px solid var(--accent); }
+.thinking { color: var(--muted); font-size: 12px; font-style: italic; }
+.tabs > section { display: none; } .tabs > section.active { display: block; }
+.feebar { display: flex; height: 14px; border-radius: 7px; overflow: hidden; background: var(--bubble); margin: 6px 0 10px; }
+.feebar span { display: block; height: 100%; }
+.legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--muted); }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+pre.box { background: var(--bubble); padding: 10px; border-radius: 8px; white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; font: 12.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+form .group { margin-bottom: 18px; }
+form .group h3 { font-size: 14px; margin: 0 0 8px; }
+.field { display: grid; grid-template-columns: minmax(160px, 260px) minmax(0, 1fr); gap: 4px 12px; align-items: center; padding: 6px 0; border-bottom: 1px solid var(--line); }
+@media (max-width: 600px) { .field { grid-template-columns: minmax(0, 1fr); } }
+.field input[type=text], .field input[type=number], .field select { font: inherit; width: 100%; max-width: 380px; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--text); }
+.field .help { grid-column: 2; color: var(--muted); font-size: 12px; }
+@media (max-width: 600px) { .field .help { grid-column: 1; } }
+.tag { font-size: 11px; color: var(--warn); margin-left: 6px; }
+.toast { position: fixed; right: 16px; bottom: 16px; display: flex; flex-direction: column; gap: 6px; z-index: 20; max-width: calc(100vw - 32px); }
+.toast div { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; box-shadow: 0 4px 14px rgba(0,0,0,.15); }
+.modal { position: fixed; inset: 0; background: rgba(0,0,0,.45); display: none; align-items: flex-start; justify-content: center; padding: 30px 16px; z-index: 30; overflow-y: auto; }
+.modal.open { display: flex; }
+.modal .card { max-width: 900px; width: 100%; }
+.votes td { white-space: normal; }
+.empty { color: var(--muted); padding: 10px 0; }
+</style>
+</head>
+<body>
+<header>
+  <div class="bar">
+    <h1>Handelsrådet</h1>
+    <span id="mode" class="pill paper">PAPPER</span>
+    <span id="status" class="pill">ansluter…</span>
+    <span id="source" class="pill"></span>
+    <span id="engine" class="pill"></span>
+    <span id="next" class="pill"></span>
+    <span class="spacer"></span>
+    <button id="btnMeeting">Möte nu</button>
+    <button id="btnPause" class="danger">Pausa</button>
+  </div>
+  <nav id="nav">
+    <a data-tab="overview" class="active">Översikt</a>
+    <a data-tab="meetings">Möten</a>
+    <a data-tab="trades">Affärer</a>
+    <a data-tab="fees">Avgifter</a>
+    <a data-tab="settings">Inställningar</a>
+  </nav>
+</header>
+
+<main class="tabs">
+  <section id="overview" class="active">
+    <div class="grid kpis">
+      <div class="card kpi"><h2>Eget kapital</h2><div class="v" id="kEquity">–</div><div class="s" id="kCash"></div></div>
+      <div class="card kpi"><h2>Idag</h2><div class="v" id="kDay">–</div><div class="s" id="kDayPct"></div></div>
+      <div class="card kpi"><h2>Totalt resultat</h2><div class="v" id="kTotal">–</div><div class="s" id="kStart"></div></div>
+      <div class="card kpi"><h2>Avgifter totalt</h2><div class="v" id="kFees">–</div><div class="s" id="kFeesNote"></div></div>
+    </div>
+    <div class="grid two" style="margin-top:12px">
+      <div class="grid" style="align-content:start">
+        <div class="card">
+          <h2>Utveckling <span class="spacer"></span>
+            <button data-range="day" class="rangeBtn">Idag</button><button data-range="all" class="rangeBtn">Allt</button></h2>
+          <svg id="chart" role="img" aria-label="Portföljens värde över tid"></svg>
+        </div>
+        <div class="card"><h2>Positioner</h2><div class="scroll"><table id="tPositions"></table></div></div>
+        <div class="card"><h2>Öppna order</h2><div class="scroll"><table id="tOrders"></table></div></div>
+        <div class="card"><h2>Kurser</h2><div class="scroll"><table id="tQuotes"></table></div></div>
+      </div>
+      <div class="card"><h2>Live från rådet</h2><div id="feed" class="feed"><div class="empty">Väntar på nästa möte…</div></div></div>
+    </div>
+  </section>
+
+  <section id="meetings">
+    <div class="card"><h2>Senaste möten</h2><div class="scroll"><table id="tMeetings"></table></div></div>
+  </section>
+
+  <section id="trades">
+    <div class="grid kpis" id="statTiles"></div>
+    <div class="card" style="margin-top:12px"><h2>Avslutade affärer</h2>
+      <p class="muted" style="margin:0 0 8px">Brutto är resultatet före courtage (spreaden ingår redan i priserna). Klicka på en affär för att se mötet som ledde till den.</p>
+      <div class="scroll"><table id="tClosed"></table></div></div>
+    <div class="card" style="margin-top:12px"><h2>Orderlogg</h2><div class="scroll"><table id="tLog"></table></div></div>
+  </section>
+
+  <section id="fees">
+    <div class="grid two">
+      <div class="card"><h2>Vart avgifterna har gått</h2>
+        <div id="feeBar" class="feebar"></div><div id="feeLegend" class="legend"></div>
+        <div id="feeImpact" style="margin-top:14px"></div>
+      </div>
+      <div class="card"><h2>Så räknar rådet just nu</h2><pre id="feeExample" class="box"></pre>
+        <p class="muted" style="margin:10px 0 0">Varje affär prövas mot regeln innan den läggs: är vinstmålet för litet jämfört med avgifterna stoppas den, även om rådet röstat för den.</p></div>
+    </div>
+  </section>
+
+  <section id="settings">
+    <div class="card"><h2>Inställningar</h2>
+      <form id="settingsForm"></form>
+      <button class="primary" id="btnSave">Spara</button> <span id="saveMsg" class="muted"></span>
+    </div>
+  </section>
+</main>
+
+<div class="modal" id="modal"><div class="card" id="modalBody"></div></div>
+<div class="toast" id="toast"></div>
+
+<script>
+const TOKEN = new URLSearchParams(location.search).get("token") || "";
+const $ = (id) => document.getElementById(id);
+const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const kr = (v, d = 0) => v == null ? "–" : Number(v).toLocaleString("sv-SE", {minimumFractionDigits: d, maximumFractionDigits: d}) + " kr";
+const num = (v, d = 2) => v == null ? "–" : Number(v).toLocaleString("sv-SE", {minimumFractionDigits: d, maximumFractionDigits: d});
+const signCls = (v) => v > 0 ? "pos" : v < 0 ? "neg" : "";
+const signed = (v, d = 0) => v == null ? "–" : (v > 0 ? "+" : "") + kr(v, d);
+
+async function api(path, opts = {}) {
+  const r = await fetch(path, {...opts, headers: {"Content-Type": "application/json", "X-Token": TOKEN, ...(opts.headers || {})}});
+  const data = await r.json();
+  if (!r.ok) throw new Error(data.fel || r.statusText);
+  return data;
+}
+function toast(text) {
+  const d = document.createElement("div"); d.textContent = text; $("toast").appendChild(d);
+  setTimeout(() => d.remove(), 6000);
+}
+function table(el, headers, rows, opts = {}) {
+  if (!rows.length) { el.innerHTML = `<tr><td class="empty">${esc(opts.empty || "Inget just nu")}</td></tr>`; return; }
+  const head = "<tr>" + headers.map(([h, r]) => `<th class="${r ? "r" : ""}">${esc(h)}</th>`).join("") + "</tr>";
+  el.innerHTML = head + rows.map((r, i) => `<tr class="${opts.click ? "click" : ""}" data-i="${i}">${r.join("")}</tr>`).join("");
+  if (opts.click) el.querySelectorAll("tr[data-i]").forEach((tr) => tr.onclick = () => opts.click(Number(tr.dataset.i)));
+}
+const td = (v, cls = "") => `<td class="${cls}">${v}</td>`;
+
+// ---------- Flikar ----------
+document.querySelectorAll("#nav a").forEach((a) => a.onclick = () => {
+  document.querySelectorAll("#nav a").forEach((x) => x.classList.toggle("active", x === a));
+  document.querySelectorAll("main > section").forEach((s) => s.classList.toggle("active", s.id === a.dataset.tab));
+  if (a.dataset.tab === "meetings") loadMeetings();
+  if (a.dataset.tab === "settings") loadSettings();
+});
+
+// ---------- Tillstånd ----------
+let state = null;
+async function loadState() {
+  try { state = await api("/api/state"); } catch (e) { $("status").textContent = "ingen kontakt: " + e.message; $("status").className = "pill err"; return; }
+  const s = state;
+  $("mode").textContent = s.live ? "LIVE" : "PAPPER"; $("mode").className = "pill " + (s.live ? "live" : "paper");
+  $("status").textContent = s.status; $("status").className = "pill" + (/fungerar inte|fel/i.test(s.status) ? " err" : "");
+  $("source").textContent = "Data: " + s.datakälla + (s.anrop_idag != null ? ` · ${s.anrop_idag} anrop` : "");
+  $("source").className = "pill" + (s.datakälla_fel ? " err" : ""); $("source").title = s.datakälla_fel || "";
+  $("engine").textContent = "AI: " + s.ai_motor;
+  $("next").textContent = s.börsen_öppen ? (s.nästa_möte ? "Nästa möte " + s.nästa_möte : "") : "Börsen stängd";
+  $("btnPause").textContent = s.pausad ? "Fortsätt" : "Pausa";
+  $("btnPause").className = s.pausad ? "primary" : "danger";
+
+  $("kEquity").textContent = kr(s.eget_kapital);
+  $("kCash").textContent = s.kontanter != null ? "Kontanter " + kr(s.kontanter) : "";
+  $("kDay").innerHTML = `<span class="${signCls(s.dagens_resultat)}">${signed(s.dagens_resultat)}</span>`;
+  $("kDayPct").textContent = (s.dagens_resultat_pct > 0 ? "+" : "") + num(s.dagens_resultat_pct, 2) + " %";
+  $("kTotal").innerHTML = `<span class="${signCls(s.totalt_resultat)}">${signed(s.totalt_resultat)}</span>`;
+  $("kStart").textContent = "Startkapital " + kr(s.startkapital);
+  const fees = Object.values(s.avgifter_totalt || {}).reduce((a, b) => a + b, 0);
+  const paid = (s.avgifter_totalt.courtage || 0) + (s.avgifter_totalt.valuta || 0) + (s.avgifter_totalt["låneavgift"] || 0);
+  $("kFees").textContent = kr(fees);
+  $("kFeesNote").textContent = `varav betalt ${kr(paid)}, spread ${kr(s.avgifter_totalt.spread || 0)}`;
+
+  table($("tPositions"), [["Papper"], ["Antal", 1], ["Snitt", 1], ["Senast", 1], ["Orealiserat", 1], ["Netto om stängd nu", 1]],
+    s.positioner.map((p) => [td(esc(p.papper) + (p.antal < 0 ? ' <span class="tag">BLANKAD</span>' : "")), td(p.antal, "r"),
+      td(num(p.snitt), "r"), td(num(p.senast), "r"), td(signed(p.orealiserat), "r " + signCls(p.orealiserat)),
+      td(p.netto_om_stängd_nu != null ? signed(p.netto_om_stängd_nu) : "–", "r " + signCls(p.netto_om_stängd_nu))]),
+    {empty: "Inga positioner"});
+  table($("tOrders"), [["Papper"], ["Sida"], ["Antal", 1], ["Pris", 1], ["Villkor"], ["Status"]],
+    s.öppna_order.map((o) => [td(esc(o.papper)), td(esc(o.sida)), td(o.antal, "r"), td(o.pris != null ? num(o.pris) : "–", "r"),
+      td(esc((o.villkor || "").replace("_ACTPRICE", "").replace("NONE", o.typ || "")) + (o.trigger ? " @ " + num(o.trigger) : "")), td(esc(o.status))]),
+    {empty: "Inga öppna order"});
+  table($("tQuotes"), [["Papper"], ["Senast", 1], ["Köp", 1], ["Sälj", 1]],
+    Object.entries(s.kurser).map(([k, q]) => [td(esc(k)), td(num(q.senast), "r"), td(num(q.köp), "r"), td(num(q.sälj), "r")]),
+    {empty: "Inga kurser än"});
+  renderTrades(); renderFees();
+}
+
+// ---------- Graf ----------
+let range = "day";
+document.querySelectorAll(".rangeBtn").forEach((b) => b.onclick = () => { range = b.dataset.range; loadHistory(); });
+async function loadHistory() {
+  document.querySelectorAll(".rangeBtn").forEach((b) => b.classList.toggle("primary", b.dataset.range === range));
+  let rows = []; try { rows = await api("/api/history?range=" + range); } catch (e) {}
+  drawChart(rows);
+}
+function drawChart(rows) {
+  const svg = $("chart"); const W = svg.clientWidth || 600, H = 220, P = {l: 70, r: 10, t: 10, b: 24};
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  if (rows.length < 2) { svg.innerHTML = `<text x="${W/2}" y="${H/2}" text-anchor="middle" fill="var(--muted)">Grafen fylls på medan boten kör</text>`; return; }
+  const ys = rows.map((r) => r.eget_kapital); let lo = Math.min(...ys), hi = Math.max(...ys);
+  if (hi - lo < 1) { hi += 50; lo -= 50; }
+  const x = (i) => P.l + i / (rows.length - 1) * (W - P.l - P.r);
+  const y = (v) => P.t + (1 - (v - lo) / (hi - lo)) * (H - P.t - P.b);
+  const pts = rows.map((r, i) => `${x(i).toFixed(1)},${y(r.eget_kapital).toFixed(1)}`).join(" ");
+  const up = ys[ys.length - 1] >= ys[0]; const col = up ? "var(--pos)" : "var(--neg)";
+  let grid = "";
+  for (let k = 0; k <= 3; k++) {
+    const v = lo + (hi - lo) * k / 3, yy = y(v);
+    grid += `<line x1="${P.l}" x2="${W - P.r}" y1="${yy}" y2="${yy}" stroke="var(--line)"/><text x="${P.l - 6}" y="${yy + 4}" text-anchor="end" font-size="11" fill="var(--muted)">${esc(num(v, 0))}</text>`;
+  }
+  const fmt = (t) => range === "day" ? t.slice(11, 16) : t.slice(5, 10) + " " + t.slice(11, 16);
+  grid += `<text x="${P.l}" y="${H - 6}" font-size="11" fill="var(--muted)">${esc(fmt(rows[0].t))}</text><text x="${W - P.r}" y="${H - 6}" text-anchor="end" font-size="11" fill="var(--muted)">${esc(fmt(rows[rows.length - 1].t))}</text>`;
+  svg.innerHTML = grid + `<polygon points="${P.l},${H - P.b} ${pts} ${W - P.r},${H - P.b}" fill="${col}" opacity=".08"/><polyline points="${pts}" fill="none" stroke="${col}" stroke-width="2"/>` +
+    `<line id="cx" y1="${P.t}" y2="${H - P.b}" stroke="var(--muted)" stroke-dasharray="3 3" visibility="hidden"/><text id="ct" font-size="12" fill="var(--text)" visibility="hidden"></text>`;
+  svg.onmousemove = (e) => {
+    const b = svg.getBoundingClientRect(); const px = (e.clientX - b.left) * W / b.width;
+    const i = Math.max(0, Math.min(rows.length - 1, Math.round((px - P.l) / (W - P.l - P.r) * (rows.length - 1))));
+    const cx = svg.querySelector("#cx"), ct = svg.querySelector("#ct");
+    cx.setAttribute("x1", x(i)); cx.setAttribute("x2", x(i)); cx.setAttribute("visibility", "visible");
+    ct.textContent = `${fmt(rows[i].t)}  ${num(rows[i].eget_kapital, 0)} kr`;
+    ct.setAttribute("x", Math.min(x(i) + 6, W - 150)); ct.setAttribute("y", P.t + 14); ct.setAttribute("visibility", "visible");
+  };
+  svg.onmouseleave = () => svg.querySelectorAll("#cx,#ct").forEach((n) => n.setAttribute("visibility", "hidden"));
+}
+
+// ---------- Live-flöde ----------
+const feed = $("feed"); let thinkingEl = null;
+function addFeed(html, cls = "") {
+  if (feed.querySelector(".empty")) feed.innerHTML = "";
+  const d = document.createElement("div"); d.className = "msg " + cls; d.innerHTML = html; feed.appendChild(d);
+  while (feed.children.length > 120) feed.firstChild.remove();
+  feed.scrollTop = feed.scrollHeight; return d;
+}
+function onEvent(ev) {
+  if (thinkingEl && ev.typ !== "tänker") { thinkingEl.remove(); thinkingEl = null; }
+  switch (ev.typ) {
+    case "möte_start": addFeed(`<b>${esc(ev.tid)} Möte om ${esc(ev.papper)}</b>`, "sys"); break;
+    case "tänker": if (thinkingEl) thinkingEl.remove(); thinkingEl = addFeed(`<span class="thinking">${esc(ev.agent)} tänker… (runda ${esc(ev.runda)})</span>`, "sys"); break;
+    case "inlägg": addFeed(`<div class="who">${esc(ev.agent)} <span class="muted">· ${esc(ev.roll)}</span></div><div class="txt">${esc(ev.text)}</div>`, ev.djävul ? "devil" : ""); break;
+    case "beslut": {
+      const votes = Object.entries(ev.röster || {}).map(([n, v]) => `${esc(n)}: ${esc(v.action)}${v.changed_mind_because_of_devil ? " (övertalad)" : ""}`).join(" · ");
+      addFeed(`<div class="who">Beslut ${esc(ev.papper)}: ${esc(ev.beslut)}</div><div class="txt">${votes}\n${esc((ev.skäl || []).join("; "))} – ${esc(ev.utfall)}</div>`, "decision");
+      loadState(); break;
+    }
+    case "order": if (["AVSLUT", "AVVISAD", "AKTIVERAD"].includes(ev.händelse)) toast(`${ev.händelse}: ${ev.sida} ${ev.antal} ${ev.papper} @ ${num(ev.pris)} – ${ev.info}`); break;
+    case "affär_stängd": toast(`Affär stängd ${ev.papper}: netto ${signed(ev.netto, 2)} (avgifter ${kr(ev.avgifter, 2)})`); loadState(); break;
+    case "status": $("status").textContent = ev.text; break;
+    case "fel": addFeed(`⚠ ${esc(ev.text)}`, "sys"); toast(ev.text); break;
+  }
+}
+function connect() {
+  const es = new EventSource("/api/events" + (TOKEN ? "?token=" + encodeURIComponent(TOKEN) : ""));
+  es.onmessage = (m) => { try { onEvent(JSON.parse(m.data)); } catch (e) {} };
+  es.onerror = () => { es.close(); setTimeout(connect, 3000); };
+}
+
+// ---------- Möten ----------
+let meetings = [];
+async function loadMeetings() {
+  try { meetings = await api("/api/meetings?limit=60"); } catch (e) { return; }
+  table($("tMeetings"), [["Tid"], ["Papper"], ["Beslut"], ["Röster"], ["Utfall"]],
+    meetings.map((m) => {
+      const v = Object.values(m.röster || {}).map((x) => x.action);
+      return [td(esc(m.tid.replace("T", " ").slice(5, 16))), td(esc(m.papper)), td(`<b>${esc(m.beslut)}</b>`), td(esc(v.join(", "))), td(esc(m.utfall), "muted")];
+    }), {empty: "Inga möten än", click: (i) => showMeeting(meetings[i])});
+}
+async function showMeetingById(id) {
+  if (!id) return toast("Affären är inte kopplad till ett möte (t.ex. stop-loss eller dagens slut)");
+  try { showMeeting(await api("/api/meeting/" + encodeURIComponent(id))); } catch (e) { toast("Hittade inte mötet"); }
+}
+function showMeeting(m) {
+  const votes = Object.entries(m.röster || {}).map(([n, v]) =>
+    `<tr><td><b>${esc(n)}</b></td><td>${esc(v.action)} ${esc(v.order_type)}</td><td class="r">${esc(v.confidence)} %</td><td class="r">${num(v.position_pct, 0)} %</td><td class="r">${num(v.stop_loss_pct, 1)} / ${num(v.take_profit_pct, 1)} / ${num(v.trailing_stop_pct, 1)}</td><td>${v.changed_mind_because_of_devil ? "Ja" : ""}</td><td>${esc(v.reasoning)}</td></tr>`).join("");
+  $("modalBody").innerHTML = `<h2>Möte om ${esc(m.papper)} · ${esc(m.tid.replace("T", " "))} <span class="spacer"></span><button id="closeModal">Stäng</button></h2>
+    <p><b>Beslut: ${esc(m.beslut)}</b> – ${esc((m.skäl || []).join("; "))} – ${esc(m.utfall)}</p>
+    <div class="scroll"><table class="votes"><tr><th>Analytiker</th><th>Röst</th><th class="r">Säkerhet</th><th class="r">Storlek</th><th class="r">Stop / mål / trailing %</th><th>Övertalad</th><th>Motivering</th></tr>${votes}</table></div>
+    <h2 style="margin-top:14px">Diskussionen</h2><div class="feed" style="max-height:none">${(m.inlägg || []).map((x) =>
+      `<div class="msg ${x.agent === "Djävulens advokat" ? "devil" : ""}"><div class="who">${esc(x.agent)}</div><div class="txt">${esc(x.text)}</div></div>`).join("")}</div>
+    <h2 style="margin-top:14px">Underlag</h2><pre class="box">${esc(m.data)}\n\n${esc(m.avgifter)}</pre>`;
+  $("modal").classList.add("open"); $("closeModal").onclick = () => $("modal").classList.remove("open");
+}
+$("modal").onclick = (e) => { if (e.target.id === "modal") $("modal").classList.remove("open"); };
+
+// ---------- Affärer & statistik ----------
+function renderTrades() {
+  if (!state) return;
+  const st = state.statistik || {}; const d = state.djävulen || {};
+  const tiles = [
+    ["Affärer", st.affärer ?? 0, ""], ["Vinstandel", st.vinstandel != null ? st.vinstandel + " %" : "–", "efter avgifter"],
+    ["Snittvinst", st.snittvinst != null ? kr(st.snittvinst, 0) : "–", "netto per vinstaffär"], ["Snittförlust", st.snittförlust != null ? kr(st.snittförlust, 0) : "–", "netto per förlustaffär"],
+    ["Brutto", signed(st.brutto), "före courtage"], ["Avgifter", kr(st.avgifter_affärer), st.avgifter_andel_av_brutto_pct != null ? st.avgifter_andel_av_brutto_pct + " % av bruttovinsten" : ""],
+    ["Netto", signed(st.netto), st.skatt ? "uppskattad skatt " + kr(st.skatt) : ""], ["Djävulens advokat", d.andel != null ? d.andel + " %" : "–", `övertalade ${d.övertalade ?? 0} av ${d.röster ?? 0} röster`],
+  ];
+  $("statTiles").innerHTML = tiles.map(([h, v, s]) => `<div class="card kpi"><h2>${esc(h)}</h2><div class="v">${esc(v)}</div><div class="s">${esc(s)}</div></div>`).join("");
+  const closed = state.avslutade_affärer || [];
+  table($("tClosed"), [["Stängd"], ["Papper"], ["Riktning"], ["Antal", 1], ["In", 1], ["Ut", 1], ["Brutto", 1], ["Avgifter", 1], ["Netto", 1], ["Avgifter/brutto", 1]],
+    closed.map((t) => [td(esc(t.stängd.replace("T", " ").slice(5, 16))), td(esc(t.papper)), td(esc(t.riktning)), td(t.antal, "r"), td(num(t.in), "r"), td(num(t.ut), "r"),
+      td(signed(t.brutto, 2), "r " + signCls(t.brutto)), td(kr(t.avgifter, 2), "r"), td(signed(t.netto, 2), "r " + signCls(t.netto)),
+      td(t.avgifter_av_brutto_pct != null ? t.avgifter_av_brutto_pct + " %" : "–", "r" + (t.brutto > 0 && t.netto <= 0 ? " neg" : ""))]),
+    {empty: "Inga avslutade affärer än", click: (i) => showMeetingById(closed[i].möte)});
+  table($("tLog"), [["Tid"], ["Händelse"], ["Order"], ["Papper"], ["Sida"], ["Antal", 1], ["Pris", 1], ["Info"]],
+    (state.orderlogg || []).slice(0, 100).map((l) => [td(esc(l.tid.slice(11))), td(esc(l.händelse)), td(esc(l.order)), td(esc(l.papper)), td(esc(l.sida)), td(l.antal, "r"), td(num(l.pris), "r"), td(esc(l.info), "muted")]),
+    {empty: "Ingen orderhistorik än"});
+}
+
+// ---------- Avgifter ----------
+const FEE_COLORS = {courtage: "#2f6fdf", valuta: "#9b59b6", spread: "#e0a030", "låneavgift": "#c63b3b"};
+function renderFees() {
+  if (!state) return;
+  const f = state.avgifter_totalt || {}; const total = Object.values(f).reduce((a, b) => a + b, 0);
+  $("feeBar").innerHTML = total ? Object.entries(f).map(([k, v]) => `<span style="width:${v / total * 100}%;background:${FEE_COLORS[k] || "#888"}" title="${esc(k)}"></span>`).join("") : "";
+  $("feeLegend").innerHTML = Object.entries(f).map(([k, v]) => `<span><i style="background:${FEE_COLORS[k] || "#888"}"></i>${esc(k)} ${esc(kr(v, 2))}</span>`).join("");
+  const st = state.statistik || {};
+  $("feeImpact").innerHTML = `<table>
+    <tr><td>Resultat före avgifter (avslutade affärer)</td><td class="r ${signCls(st.brutto)}">${esc(signed(st.brutto, 2))}</td></tr>
+    <tr><td>Avgifter på avslutade affärer</td><td class="r">−${esc(kr(st.avgifter_affärer, 2))}</td></tr>
+    <tr><td><b>Resultat efter avgifter</b></td><td class="r ${signCls(st.netto)}"><b>${esc(signed(st.netto, 2))}</b></td></tr>
+    ${st.skatt ? `<tr><td>Uppskattad skatt (AF-konto)</td><td class="r">−${esc(kr(st.skatt, 2))}</td></tr>` : ""}
+    <tr><td>Affärer som gick med vinst före avgifter men förlust efter</td><td class="r">${esc(st.avgifter_åt_upp_vinsten ?? 0)}</td></tr>
+  </table><p class="muted" style="margin:8px 0 0">Spread är ingen avgift som dras separat: den är skillnaden mellan mittkursen och priset du faktiskt fick, och ingår redan i bruttot.</p>`;
+  $("feeExample").textContent = state.avgiftsexempel || "";
+}
+
+// ---------- Inställningar ----------
+let schema = [];
+async function loadSettings() {
+  const data = await api("/api/settings"); schema = data.schema; const v = data.värden;
+  const groups = {};
+  schema.forEach((f) => (groups[f.grupp] = groups[f.grupp] || []).push(f));
+  $("settingsForm").innerHTML = Object.entries(groups).map(([g, fs]) => `<div class="group"><h3>${esc(g)}</h3>${fs.map((f) => {
+    const val = v[f.key]; let input;
+    if (typeof val === "boolean") input = `<input type="checkbox" name="${esc(f.key)}" ${val ? "checked" : ""}>`;
+    else if (f.val) input = `<select name="${esc(f.key)}">${f.val.map((o) => `<option ${o === val ? "selected" : ""}>${esc(o)}</option>`).join("")}</select>`;
+    else if (Array.isArray(val)) input = `<input type="text" name="${esc(f.key)}" value="${esc(val.join(", "))}">`;
+    else input = `<input type="${typeof val === "number" ? "number" : "text"}" step="any" name="${esc(f.key)}" value="${esc(val)}">`;
+    return `<div class="field"><label>${esc(f.etikett)}${f.omstart ? '<span class="tag">kräver omstart</span>' : ""}</label>${input}${f.hjälp ? `<div class="help">${esc(f.hjälp)}</div>` : ""}</div>`;
+  }).join("")}</div>`).join("");
+}
+$("btnSave").onclick = async () => {
+  const body = {};
+  $("settingsForm").querySelectorAll("[name]").forEach((el) => body[el.name] = el.type === "checkbox" ? el.checked : el.value);
+  try {
+    const r = await api("/api/settings", {method: "POST", body: JSON.stringify(body)});
+    $("saveMsg").textContent = "Sparat." + (r.kräver_omstart.length ? " Starta om boten för: " + r.kräver_omstart.join(", ") : "");
+    loadState();
+  } catch (e) { $("saveMsg").textContent = "Fel: " + e.message; }
+};
+
+// ---------- Knappar ----------
+$("btnPause").onclick = async () => { await api("/api/pause", {method: "POST", body: JSON.stringify({paused: !(state && state.pausad)})}); loadState(); };
+$("btnMeeting").onclick = async () => { await api("/api/meeting-now", {method: "POST", body: "{}"}); toast(state && !state.börsen_öppen ? "Börsen är stängd – mötet körs inte" : "Möte startas"); };
+
+connect(); loadState(); loadHistory();
+setInterval(loadState, 5000); setInterval(loadHistory, 60000);
+addEventListener("resize", () => loadHistory());
+</script>
+</body>
+</html>

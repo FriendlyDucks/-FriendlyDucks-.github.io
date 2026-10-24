@@ -166,7 +166,7 @@ class NordnetClient:
             params["instrument_id"] = instrument_id
         return self._request("GET", "/news", params=params)
 
-    def tradable_from_symbol(self, symbol: str, market_id: int = 11, yahoo: Optional[str] = None) -> Tradable:
+    def tradable_from_symbol(self, symbol: str, market_id: int = 11, data_symbol: Optional[str] = None) -> Tradable:
         """Slå upp ett värdepapper, t.ex. 'VOLV B' på Stockholmsbörsen (market_id 11)."""
         for inst in self.lookup_symbol(symbol):
             for t in inst.get("tradables", []):
@@ -177,6 +177,6 @@ class NordnetClient:
                         identifier=str(t["identifier"]),
                         currency=inst.get("currency", "SEK"),
                         lot_size=int(t.get("lot_size", 1)),
-                        yahoo=yahoo,
+                        data_symbol=data_symbol,
                     )
         raise NordnetError(f"Hittade inte {symbol} på marknad {market_id}")

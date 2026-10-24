@@ -20,8 +20,9 @@ import threading
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
+from fees import FeeModel
 from orders import Activation, OrderRequest, OrderType, Quote, Side, Tradable, Validity
 
 
@@ -48,16 +49,12 @@ class PaperOrder:
 class PaperPosition:
     qty: int = 0  # Negativt = blankat
     avg_price: float = 0.0
+    fees: float = 0.0  # Avgifter för att öppna positionen som ännu inte bokförts på en avslutad affär
+    meeting: str = ""  # Mötet som beslutade om affären
+    opened: str = ""
 
 
-@dataclass
-class CostModel:
-    courtage_pct: float = 0.0025
-    courtage_min: float = 1.0
-    short_margin: float = 1.5  # Eget kapital måste vara minst så här mycket gånger blankat värde
-
-    def courtage(self, value: float) -> float:
-        return max(self.courtage_min, value * self.courtage_pct)
+FEE_KINDS = ("courtage", "valuta", "spread", "låneavgift")
 
 
 class PaperBroker:
@@ -67,12 +64,18 @@ class PaperBroker:
         self,
         path: Path,
         starting_cash: float,
-        costs: CostModel,
+        fees: FeeModel,
         allow_short: bool = True,
         shortable: Optional[set[str]] = None,
+        short_margin: float = 1.5,  # Eget kapital måste vara minst så här mycket gånger blankat värde
     ) -> None:
         self.path = path
-        self.costs = costs
+        self.fees = fees
+        self.short_margin = short_margin
+        self.starting_cash = starting_cash
+        self.fee_totals: dict[str, float] = {k: 0.0 for k in FEE_KINDS}
+        self.closed_trades: list[dict] = []
+        self.listener: Optional[Callable[[dict], None]] = None
         self.allow_short = allow_short
         self.shortable = shortable  # None = alla får blankas
         self.cash = starting_cash
@@ -99,11 +102,16 @@ class PaperBroker:
         self.day = data.get("day", "")
         self.start_of_day_equity = data.get("start_of_day_equity", self.cash)
         self.log = data.get("log", [])
+        self.starting_cash = data.get("starting_cash", self.starting_cash)
+        self.fee_totals.update(data.get("fee_totals", {}))
+        self.closed_trades = data.get("closed_trades", [])
         for key, t in data.get("tradables", {}).items():
+            t.pop("yahoo", None)
             self.tradables[key] = Tradable(**t)
         for key, p in data.get("positions", {}).items():
             self.positions[key] = PaperPosition(**p)
         for o in data.get("orders", []):
+            o["tradable"].pop("yahoo", None)
             o["tradable"] = Tradable(**o["tradable"])
             for name, enum in (("side", Side), ("order_type", OrderType), ("validity", Validity), ("activation", Activation)):
                 o[name] = enum(o[name])
@@ -116,6 +124,9 @@ class PaperBroker:
             active = [o for o in self.orders.values() if o.state in ("WAITING", "ON_MARKET")]
             data = {
                 "cash": self.cash,
+                "starting_cash": self.starting_cash,
+                "fee_totals": self.fee_totals,
+                "closed_trades": self.closed_trades[-1000:],
                 "realized_today": self.realized_today,
                 "day": self.day,
                 "start_of_day_equity": self.start_of_day_equity,
@@ -160,6 +171,15 @@ class PaperBroker:
             for o in self.open_orders():
                 if o.validity == Validity.DAY:
                     o.state, o.note = "DELETED", "dagsorder utgången"
+            # Blankningar som legat kvar över natten kostar låneavgift.
+            if self.day:
+                for key, pos in self.positions.items():
+                    if pos.qty < 0:
+                        q = self.last_quotes.get(key)
+                        fee = self.fees.borrow_fee_per_night(-pos.qty * (q.last if q else pos.avg_price))
+                        self.cash -= fee
+                        pos.fees += fee
+                        self.fee_totals["låneavgift"] += fee
             self.day = today
             self.realized_today = 0.0
             self.start_of_day_equity = self.equity()
@@ -223,7 +243,7 @@ class PaperBroker:
             if self.shortable is not None and o.tradable.symbol not in self.shortable:
                 return f"{o.tradable.symbol} får inte blankas"
             new_short = (o.volume - max(pos.qty, 0)) * ref_price
-            if self.short_exposure(new_short) * self.costs.short_margin > self.equity():
+            if self.short_exposure(new_short) * self.short_margin > self.equity():
                 return "otillräcklig säkerhet för blankning"
         if o.side == Side.BUY and pos.qty >= 0 and o.activation == Activation.NONE:
             reserved = sum(
@@ -231,7 +251,7 @@ class PaperBroker:
                 if x.side == Side.BUY and x.state == "ON_MARKET" and self.position(x.tradable).qty >= 0
             )
             cost = ref_price * o.volume
-            if cost + self.costs.courtage(cost) + reserved > self.cash:
+            if cost + self.fees.trade_fees(cost, o.tradable.currency) + reserved > self.cash:
                 return "otillräcklig köpkraft"
         return None
 
@@ -290,20 +310,51 @@ class PaperBroker:
                 lot = max(o.tradable.lot_size, 1)
                 o.volume = int(book_vol // lot * lot) or o.volume
         if marketable:
-            self._fill(o, book)
+            self._fill(o, book, q.mid)
 
-    def _fill(self, o: PaperOrder, price: float) -> None:
+    def _fill(self, o: PaperOrder, price: float, mid: float) -> None:
         key = o.tradable.key
         pos = self.positions.setdefault(key, PaperPosition())
         value = price * o.volume
-        fee = self.costs.courtage(value)
+        courtage = self.fees.courtage(value)
+        fx = self.fees.fx_fee(value, o.tradable.currency)
+        fee = courtage + fx
+        spread_cost = abs(price - mid) * o.volume if mid else 0.0  # Redan inbakad i priset
+        self.fee_totals["courtage"] += courtage
+        self.fee_totals["valuta"] += fx
+        self.fee_totals["spread"] += spread_cost
         signed = o.volume if o.side == Side.BUY else -o.volume
 
+        closing = 0
         realized = 0.0
         if pos.qty and (pos.qty > 0) != (signed > 0):  # Minskar/stänger befintlig position
             closing = min(abs(pos.qty), abs(signed))
             direction = 1 if pos.qty > 0 else -1
             realized = (price - pos.avg_price) * closing * direction
+            share = closing / abs(pos.qty)
+            entry_fees = pos.fees * share
+            pos.fees -= entry_fees
+            exit_fees = fee * closing / o.volume
+            total_fees = entry_fees + exit_fees
+            net = realized - total_fees
+            self.closed_trades.append({
+                "stängd": datetime.now().isoformat(timespec="seconds"),
+                "öppnad": pos.opened,
+                "papper": o.tradable.symbol,
+                "riktning": "LÅNG" if direction > 0 else "BLANKAD",
+                "antal": closing,
+                "in": round(pos.avg_price, 4),
+                "ut": round(price, 4),
+                "brutto": round(realized, 2),
+                "avgifter": round(total_fees, 2),
+                "netto": round(net, 2),
+                "skatt": round(self.fees.tax_on(net), 2),
+                "avgifter_av_brutto_pct": round(total_fees / abs(realized) * 100, 1) if realized else None,
+                "möte": pos.meeting,
+                "orsak": o.reference or "",
+            })
+            self._notify({"typ": "affär_stängd", **self.closed_trades[-1]})
+        opening_volume = abs(signed) - closing
         new_qty = pos.qty + signed
         if new_qty == 0:
             pos.avg_price = 0.0
@@ -311,12 +362,21 @@ class PaperBroker:
             pos.avg_price = price  # Ny position eller vänt från lång till kort
         elif (pos.qty > 0) == (signed > 0):
             pos.avg_price = (pos.avg_price * abs(pos.qty) + value) / abs(new_qty)
+        if opening_volume:
+            pos.fees += fee * opening_volume / o.volume
+            if pos.qty == 0 or (pos.qty > 0) != (new_qty > 0):
+                pos.opened = datetime.now().isoformat(timespec="seconds")
+                pos.meeting = o.reference if (o.reference or "").startswith("m") else ""
         pos.qty = new_qty
+        if new_qty == 0:
+            pos.fees, pos.meeting, pos.opened = 0.0, "", ""
 
         self.cash += -value - fee if o.side == Side.BUY else value - fee
         self.realized_today += realized - fee
         o.state = "DONE"
-        self._record("AVSLUT", o, o.volume, price, f"courtage {fee:.2f}, realiserat {realized:+.2f}")
+        self._record("AVSLUT", o, o.volume, price,
+                     f"courtage {courtage:.2f}{f', valuta {fx:.2f}' if fx else ''}, spread {spread_cost:.2f}, "
+                     f"realiserat {realized:+.2f}")
 
         # Stängd position -> makulera kvarvarande skyddsorder i samma papper.
         if pos.qty == 0:
@@ -345,7 +405,74 @@ class PaperBroker:
             "info": text,
         }
         self.log.append(entry)
+        self._notify({"typ": "order", **entry})
         print(f"  [{self.name}] {event} {o.order_id} {o.side.value} {volume} {o.tradable.symbol} @ {price:.2f} – {text}")
+
+    def _notify(self, event: dict) -> None:
+        if self.listener:
+            try:
+                self.listener(event)
+            except Exception:
+                pass
+
+    def stats(self) -> dict:
+        trades = self.closed_trades
+        wins = [t for t in trades if t["netto"] > 0]
+        losses = [t for t in trades if t["netto"] <= 0]
+        gross = sum(t["brutto"] for t in trades)
+        fees = sum(t["avgifter"] for t in trades)
+        # Affärer som var vinst före avgifter men förlust efter
+        eaten = [t for t in trades if t["brutto"] > 0 >= t["netto"]]
+        return {
+            "affärer": len(trades),
+            "vinstandel": round(len(wins) / len(trades) * 100, 1) if trades else None,
+            "snittvinst": round(sum(t["netto"] for t in wins) / len(wins), 2) if wins else None,
+            "snittförlust": round(sum(t["netto"] for t in losses) / len(losses), 2) if losses else None,
+            "brutto": round(gross, 2),
+            "avgifter_affärer": round(fees, 2),
+            "netto": round(gross - fees, 2),
+            "skatt": round(sum(t["skatt"] for t in trades), 2),
+            "avgifter_åt_upp_vinsten": len(eaten),
+            "avgifter_andel_av_brutto_pct": round(fees / gross * 100, 1) if gross > 0 else None,
+        }
+
+    def state_dict(self) -> dict:
+        with self._lock:
+            positions = []
+            for key, p in self.positions.items():
+                if not p.qty:
+                    continue
+                t = self.tradables.get(key)
+                q = self.last_quotes.get(key)
+                last = q.last if q else p.avg_price
+                unreal = (last - p.avg_price) * p.qty
+                exit_fee = self.fees.trade_fees(abs(p.qty) * last, t.currency if t else "SEK")
+                positions.append({
+                    "papper": t.symbol if t else key, "antal": p.qty, "snitt": round(p.avg_price, 4),
+                    "senast": round(last, 4), "orealiserat": round(unreal, 2),
+                    "netto_om_stängd_nu": round(unreal - p.fees - exit_fee, 2),
+                    "avgifter_hittills": round(p.fees, 2), "möte": p.meeting, "öppnad": p.opened,
+                })
+            orders = [{"id": o.order_id, "papper": o.tradable.symbol, "sida": o.side.value, "antal": o.volume,
+                       "pris": o.price, "typ": o.order_type.value, "villkor": o.activation.value,
+                       "trigger": o.trigger_value, "status": o.state} for o in self.open_orders()]
+            equity = self.equity()
+            return {
+                "mäklare": self.name,
+                "kontanter": round(self.cash, 2),
+                "eget_kapital": round(equity, 2),
+                "startkapital": self.starting_cash,
+                "totalt_resultat": round(equity - self.starting_cash, 2),
+                "dagens_resultat": round(equity - self.start_of_day_equity, 2),
+                "dagens_resultat_pct": round((equity / self.start_of_day_equity - 1) * 100, 3) if self.start_of_day_equity else 0,
+                "realiserat_idag": round(self.realized_today, 2),
+                "avgifter_totalt": {k: round(v, 2) for k, v in self.fee_totals.items()},
+                "positioner": positions,
+                "öppna_order": orders,
+                "statistik": self.stats(),
+                "avslutade_affärer": self.closed_trades[-200:][::-1],
+                "orderlogg": self.log[-200:][::-1],
+            }
 
     def summary_text(self) -> str:
         with self._lock:
